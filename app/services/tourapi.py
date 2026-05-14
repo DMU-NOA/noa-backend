@@ -5,13 +5,13 @@ from dotenv import load_dotenv
 from app.schemas.schemas import TouristSpot
 
 load_dotenv() # .env 파일 로드
-TOUR_API_KEY = os.getenv("TOUR_API_KEY")
-BASE_URL = "http://apis.data.go.kr/B551011/KorService1"
+TOUR_API_KEY = os.getenv("TOUR_API_KEY")    
+BASE_URL = "https://apis.data.go.kr/B551011/KorService2"
 
 async def fetch_default_spots():
-    url = f"{BASE_URL}/areaBasedList1"
+    url = f"{BASE_URL}/areaBasedList2"
     params = {
-        "serviceKey": TOUR_API_KEY, # 이제 Decoding 키가 들어갑니다
+        "serviceKey": TOUR_API_KEY,
         "numOfRows": 10,
         "pageNo": 1,
         "MobileOS": "ETC",
@@ -24,19 +24,17 @@ async def fetch_default_spots():
     async with httpx.AsyncClient() as client:
         response = await client.get(url, params=params)
         
-        # 🚨 [추가된 부분] 상태 코드가 200이 아니거나, 내용이 JSON이 아닐 때를 대비한 방어 코드
         try:
             data = response.json()
         except Exception:
-            # 에러가 나면 TourAPI가 뱉은 실제 텍스트(보통 XML)를 터미널에 출력합니다.
-            print("🚨 [TourAPI 응답 에러] JSON이 아닙니다! 실제 응답 내용:")
-            print(response.text)
-            return [] # 프론트엔드가 뻗지 않게 빈 리스트 반환
+            print("🚨 [TourAPI 응답 에러] JSON이 아닙니다!")
+            print(f"📡 요청 URL 확인용: {response.url}") # 터미널에 찍히는 이 주소를 클릭해 보세요.
+            print(f"💬 응답 내용: {response.text}")
+            return []
         
+        # v2 데이터 구조에 맞춰 파싱
         items = data.get("response", {}).get("body", {}).get("items", {})
-        
-        # 아이템이 없을 경우 예외 처리
-        if not items:
+        if not items or not items.get("item"):
             return []
             
         item_list = items.get("item", [])
