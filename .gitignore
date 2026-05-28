@@ -2,3 +2,7 @@
 __pycache__/
 *.pyc
 .venv/
+mapping_result.csv
+*.xlsx
+*.pyo
+*.pyd
