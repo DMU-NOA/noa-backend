@@ -18,6 +18,18 @@ def init_tables():
     
     # 1. 테이블 생성 (없을 때만 생성)
     print("⏳ 테이블 상태 확인 중...")
+    # users 테이블 (소셜 로그인)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id          SERIAL PRIMARY KEY,
+            social_id   VARCHAR(255) NOT NULL,          -- 소셜 플랫폼 고유 ID
+            provider    VARCHAR(20)  NOT NULL,          -- 'google' | 'kakao'
+            email       VARCHAR(255),
+            name        VARCHAR(100),
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (social_id, provider)               -- 같은 플랫폼 중복 방지
+        );
+    """)
     cur.execute("CREATE TABLE IF NOT EXISTS seoul_spots (area_cd VARCHAR(50) PRIMARY KEY, name VARCHAR(255), category VARCHAR(50));")
     cur.execute("CREATE TABLE IF NOT EXISTS tour_spots (content_id VARCHAR(50) PRIMARY KEY, name VARCHAR(255), image_url TEXT, description TEXT, address TEXT);")
     cur.execute("CREATE TABLE IF NOT EXISTS spot_mapping (id SERIAL PRIMARY KEY, area_cd VARCHAR(50) REFERENCES seoul_spots(area_cd), content_id VARCHAR(50) REFERENCES tour_spots(content_id));")
