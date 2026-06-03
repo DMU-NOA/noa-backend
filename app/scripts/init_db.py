@@ -1,5 +1,4 @@
 import os
-import csv
 import psycopg2
 import openpyxl
 from dotenv import load_dotenv
@@ -16,43 +15,87 @@ def init_tables():
     conn = get_db()
     cur = conn.cursor()
     
-    # 1. 테이블 생성 (없을 때만 생성)
-    print("⏳ 테이블 상태 확인 중...")
+    # 1. 싹 다 지우기 (외래키 무시하고 연쇄 삭제)
+    print("⏳ 기존 테이블 초기화(삭제) 중...")
+    cur.execute("DROP TABLE IF EXISTS congestion_data CASCADE;")
+    cur.execute("DROP TABLE IF EXISTS spot_mapping CASCADE;")
+    cur.execute("DROP TABLE IF EXISTS tour_spots CASCADE;")
+    cur.execute("DROP TABLE IF EXISTS seoul_spots CASCADE;")
+    cur.execute("DROP TABLE IF EXISTS users CASCADE;")
+    
+    # 2. 깨끗한 상태에서 테이블 다시 만들기
+    print("⏳ 새로운 테이블 생성 중...")
+    
     # users 테이블 (소셜 로그인)
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
+        CREATE TABLE users (
             id          SERIAL PRIMARY KEY,
-            social_id   VARCHAR(255) NOT NULL,          -- 소셜 플랫폼 고유 ID
-            provider    VARCHAR(20)  NOT NULL,          -- 'google' | 'kakao'
+            social_id   VARCHAR(255) NOT NULL,
+            provider    VARCHAR(20)  NOT NULL,
             email       VARCHAR(255),
             name        VARCHAR(100),
             created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE (social_id, provider)               -- 같은 플랫폼 중복 방지
+            UNIQUE (social_id, provider)
         );
     """)
-    cur.execute("CREATE TABLE IF NOT EXISTS seoul_spots (area_cd VARCHAR(50) PRIMARY KEY, name VARCHAR(255), category VARCHAR(50));")
-    cur.execute("CREATE TABLE IF NOT EXISTS tour_spots (content_id VARCHAR(50) PRIMARY KEY, name VARCHAR(255), image_url TEXT, description TEXT, address TEXT, mapx NUMERIC(10, 7),mapy NUMERIC(10, 7));")
-    cur.execute("CREATE TABLE IF NOT EXISTS spot_mapping (id SERIAL PRIMARY KEY, area_cd VARCHAR(50) REFERENCES seoul_spots(area_cd), content_id VARCHAR(50) REFERENCES tour_spots(content_id));")
-    cur.execute("CREATE TABLE IF NOT EXISTS congestion_data (id SERIAL PRIMARY KEY, area_cd VARCHAR(50) REFERENCES seoul_spots(area_cd), congestion_level VARCHAR(20), updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);")
     
-    # 2. 엑셀 데이터 적재 (중복 방지: ON CONFLICT DO NOTHING)
+    cur.execute("""
+        CREATE TABLE seoul_spots (
+            area_cd VARCHAR(50) PRIMARY KEY, 
+            name VARCHAR(255), 
+            category VARCHAR(50)
+        );
+    """)
+    
+    # 💡 mapx, mapy가 포함된 최신 구조로 생성
+    cur.execute("""
+        CREATE TABLE tour_spots (
+            content_id VARCHAR(50) PRIMARY KEY, 
+            name VARCHAR(255), 
+            image_url TEXT, 
+            description TEXT, 
+            address TEXT, 
+            mapx NUMERIC(10, 7),
+            mapy NUMERIC(10, 7)
+        );
+    """)
+    
+    cur.execute("""
+        CREATE TABLE spot_mapping (
+            id SERIAL PRIMARY KEY, 
+            area_cd VARCHAR(50) REFERENCES seoul_spots(area_cd), 
+            content_id VARCHAR(50) REFERENCES tour_spots(content_id)
+        );
+    """)
+    
+    cur.execute("""
+        CREATE TABLE congestion_data (
+            id SERIAL PRIMARY KEY, 
+            area_cd VARCHAR(50) REFERENCES seoul_spots(area_cd), 
+            congestion_level VARCHAR(20), 
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    
+    conn.commit() # 변경사항 확정
+    
+    # 3. 엑셀 데이터 적재
     wb = openpyxl.load_workbook("서울시 주요 121장소 목록.xlsx", data_only=True)
     sheet = wb.active
     
-    print("⏳ 데이터 적재 시작 (중복은 건너뜁니다)...")
+    print("⏳ 데이터 적재 시작...")
     for row in sheet.iter_rows(min_row=2, values_only=True):
         area_cd, name, cat = row[2], row[3], row[0]
-        # ON CONFLICT DO NOTHING: 이미 있으면 그냥 무시하고 넘어감
         cur.execute("""
             INSERT INTO seoul_spots (area_cd, name, category) 
             VALUES (%s, %s, %s) 
             ON CONFLICT (area_cd) DO NOTHING
         """, (area_cd, name, cat))
-    
+        
     conn.commit()
     cur.close()
     conn.close()
-    print("✅ 성공: 테이블 상태 확인 및 데이터 적재 완료 (기존 데이터 유지됨).")
+    print("✅ 성공: 테이블 초기화 및 기초 데이터 적재 완료!")
 
 if __name__ == "__main__":
     init_tables()
