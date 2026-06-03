@@ -31,7 +31,7 @@ def init_tables():
         );
     """)
     cur.execute("CREATE TABLE IF NOT EXISTS seoul_spots (area_cd VARCHAR(50) PRIMARY KEY, name VARCHAR(255), category VARCHAR(50));")
-    cur.execute("CREATE TABLE IF NOT EXISTS tour_spots (content_id VARCHAR(50) PRIMARY KEY, name VARCHAR(255), image_url TEXT, description TEXT, address TEXT);")
+    cur.execute("CREATE TABLE IF NOT EXISTS tour_spots (content_id VARCHAR(50) PRIMARY KEY, name VARCHAR(255), image_url TEXT, description TEXT, address TEXT, mapx NUMERIC(10, 7),mapy NUMERIC(10, 7));")
     cur.execute("CREATE TABLE IF NOT EXISTS spot_mapping (id SERIAL PRIMARY KEY, area_cd VARCHAR(50) REFERENCES seoul_spots(area_cd), content_id VARCHAR(50) REFERENCES tour_spots(content_id));")
     cur.execute("CREATE TABLE IF NOT EXISTS congestion_data (id SERIAL PRIMARY KEY, area_cd VARCHAR(50) REFERENCES seoul_spots(area_cd), congestion_level VARCHAR(20), updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);")
     

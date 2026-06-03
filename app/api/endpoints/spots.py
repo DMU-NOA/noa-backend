@@ -15,6 +15,7 @@ def get_all_spots():
         SELECT 
             s.area_cd, s.name, s.category, 
             t.image_url, t.description, t.address, 
+            t.mapx, t.mapy,
             c.congestion_level
         FROM seoul_spots s
         LEFT JOIN spot_mapping m ON s.area_cd = m.area_cd
@@ -39,7 +40,9 @@ def get_all_spots():
                 "image_url": row[3],
                 "description": row[4],
                 "address": row[5],
-                "congestion_level": row[6] if row[6] else "데이터 없음"
+                "mapx": float(row[6]) if row[6] else 0.0,
+                "mapy": float(row[7]) if row[7] else 0.0,
+                "congestion_level": row[8] if row[8] else "데이터 없음"
             })
         return {"data": results}
     

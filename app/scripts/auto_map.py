@@ -45,7 +45,11 @@ def auto_map_spots():
             content_id = item['contentid']
             
             # 2. 찾은 ID로 DB 연결 (매핑 테이블에 등록)
-            cur.execute("INSERT INTO tour_spots (content_id) VALUES (%s) ON CONFLICT DO NOTHING", (content_id,))
+            cur.execute("""
+    INSERT INTO tour_spots (content_id, mapx, mapy) 
+    VALUES (%s, %s, %s) 
+    ON CONFLICT (content_id) DO UPDATE SET mapx=EXCLUDED.mapx, mapy=EXCLUDED.mapy
+""", (content_id, item.get('mapx'), item.get('mapy')))
             cur.execute("INSERT INTO spot_mapping (area_cd, content_id) VALUES (%s, %s)", (area_cd, content_id))
             
             print(f"✅ [{name}] 자동 매핑 완료! (ID: {content_id})")

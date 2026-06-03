@@ -15,7 +15,8 @@ app.add_middleware(
     allow_headers=["*"], # 모든 헤더 허용
 )
 
-app.include_router(spots.router, prefix="/api", tags=["Spots"], dependencies=[Depends(get_current_user)])
+#app.include_router(spots.router, prefix="/api", tags=["Spots"], dependencies=[Depends(get_current_user)])
+app.include_router(spots.router, prefix="/api", tags=["Spots"])
 app.include_router(auth.router, prefix="/auth", tags=["Auth"])
 
 @app.get("/")

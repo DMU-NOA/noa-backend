@@ -53,9 +53,17 @@ def update_tour_info():
             # DB 업데이트
             cur.execute("""
                 UPDATE tour_spots 
-                SET name=%s, image_url=%s, description=%s, address=%s 
+                SET name=%s, image_url=%s, description=%s, address=%s, mapx=%s, mapy=%s
                 WHERE content_id=%s
-            """, (item.get('title'), item.get('firstimage'), item.get('overview', '').replace('<br>', ' '), item.get('addr1'), cid))
+            """, (
+                item.get('title'), 
+                item.get('firstimage'), 
+                item.get('overview', '').replace('<br>', ' '), 
+                item.get('addr1'), 
+                item.get('mapx'), # 💡 좌표 추가
+                item.get('mapy'), # 💡 좌표 추가
+                cid
+            ))
             
             print(f"✅ 업데이트 성공: {item.get('title')}")
             
