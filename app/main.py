@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import Depends
-from app.api.endpoints import auth, spots
+from app.api.endpoints import auth, spots, chat
 from app.api.dependencies import get_current_user
 
 app = FastAPI(title="NOA Backend API")
@@ -17,6 +17,7 @@ app.add_middleware(
 
 app.include_router(spots.router, prefix="/api", tags=["Spots"], dependencies=[Depends(get_current_user)])
 app.include_router(auth.router, prefix="/auth", tags=["Auth"])
+app.include_router(chat.router, prefix="/api/chat", tags=["Chat"])
 
 @app.get("/")
 def read_root():

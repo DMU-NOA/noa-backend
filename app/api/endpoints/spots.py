@@ -1,7 +1,8 @@
 from fastapi import APIRouter, HTTPException
-from app.scripts.db import get_db # DB 연결 함수가 있는 곳을 import하세요
+from app.scripts.db import get_db
 import os
 import requests
+from openai import OpenAI # 💡 AI 연결을 위해 추가된 모듈
 
 router = APIRouter()
 
@@ -137,42 +138,91 @@ def get_spot_detail(area_cd: str):
         cur.close()
         conn.close()
 
+# 💡 대안 장소 추천 API (AI 로직으로 완벽 교체 완료!)
 @router.get("/spots/{area_cd}/alternatives")
 def get_alternatives(area_cd: str):
     conn = get_db()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT category FROM seoul_spots WHERE area_cd = %s", (area_cd,))
-        row = cur.fetchone()
-        if not row: return []
-        category = row[0]
-
-        query = """
-            SELECT s.area_cd, s.name, s.category, t.image_url, t.description, t.address, c.congestion_level
+        # 1. 사용자가 선택한 원래 장소의 정보(이름, 카테고리, 설명) 가져오기
+        cur.execute("""
+            SELECT s.name, s.category, t.description 
             FROM seoul_spots s
             LEFT JOIN spot_mapping m ON s.area_cd = m.area_cd
             LEFT JOIN tour_spots t ON m.content_id = t.content_id
-            LEFT JOIN (
-                SELECT DISTINCT ON (area_cd) area_cd, congestion_level 
-                FROM congestion_data 
-                ORDER BY area_cd, updated_at DESC
-            ) c ON s.area_cd = c.area_cd
-            WHERE s.category = %s AND s.area_cd != %s
-            ORDER BY 
-                CASE c.congestion_level
-                    WHEN '여유' THEN 1
-                    WHEN '보통' THEN 2
-                    WHEN '약간 붐빔' THEN 3
-                    WHEN '붐빔' THEN 4
-                    ELSE 5
-                END ASC, 
-                RANDOM() 
-            LIMIT 4
-        """
-        cur.execute(query, (category, area_cd))
-        rows = cur.fetchall()
+            WHERE s.area_cd = %s
+        """, (area_cd,))
+        origin = cur.fetchone()
         
-        return [{"area_cd": r[0], "name": r[1], "category": r[2], "image_url": r[3], "description": r[4], "address": r[5], "congestion_level": r[6]} for r in rows]
+        if not origin:
+            return []
+            
+        origin_name, origin_cat, origin_desc = origin
+        origin_desc = origin_desc if origin_desc else ""
+        origin_info = f"이름: {origin_name}, 테마: {origin_cat}, 특징: {origin_desc[:100]}..."
+
+        # 2. 현재 혼잡도가 '여유' 또는 '보통'인 후보 장소들 싹 다 긁어오기
+        cur.execute("""
+            SELECT s.area_cd, s.name, s.category 
+            FROM seoul_spots s
+            JOIN congestion_data c ON s.area_cd = c.area_cd
+            WHERE c.congestion_level IN ('여유', '보통') 
+            AND s.area_cd != %s
+        """, (area_cd,))
+        candidates = cur.fetchall()
+
+        if not candidates:
+            return []
+
+        # AI에게 먹여줄 텍스트로 변환
+        candidate_text = "\n".join([f"ID: {c[0]} | 이름: {c[1]} | 테마: {c[2]}" for c in candidates])
+
+        # 3. OpenAI 호출하여 가장 분위기가 비슷한 곳 3~4개 추천받기
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        system_prompt = f"""
+        너는 여행 전문가야. 사용자가 가려던 목적지가 너무 붐벼서 대안 장소를 찾고 있어.
+        목적지의 테마, 분위기, 특징을 분석해서 아래 [후보 리스트] 중 가장 유사성이 높은 장소 딱 4개만 골라줘.
+        
+        [목적지 정보]
+        {origin_info}
+
+        [후보 리스트]
+        {candidate_text}
+
+        규칙:
+        1. 반드시 [후보 리스트]에 있는 ID만 고를 것.
+        2. 다른 설명은 일절 하지 말고, 쉼표로 구분된 ID 4개만 텍스트로 출력할 것. (예: POI002, POI015, POI102, POI111)
+        """
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": system_prompt}]
+        )
+        
+        # AI가 뽑아준 ID 파싱 ("POI001, POI045...")
+        ai_reply = response.choices[0].message.content
+        selected_ids = [aid.strip() for aid in ai_reply.split(",") if aid.strip()]
+
+        # 4. 뽑힌 장소들의 상세 정보를 DB에서 다시 조회하여 프론트엔드에 전달
+        if selected_ids:
+            cur.execute("""
+                SELECT s.area_cd, s.name, s.category, t.image_url, t.description, t.address, c.congestion_level
+                FROM seoul_spots s
+                LEFT JOIN spot_mapping m ON s.area_cd = m.area_cd
+                LEFT JOIN tour_spots t ON m.content_id = t.content_id
+                LEFT JOIN congestion_data c ON s.area_cd = c.area_cd
+                WHERE s.area_cd IN %s
+            """, (tuple(selected_ids),))
+            
+            rows = cur.fetchall()
+            return [{"area_cd": r[0], "name": r[1], "category": r[2], "image_url": r[3], "description": r[4], "address": r[5], "congestion_level": r[6]} for r in rows]
+        else:
+            return []
+
+    except Exception as e:
+        print(f"🚨 AI 대안 관광지 추천 에러: {e}")
+        return []
+        
     finally:
         cur.close()
         conn.close()
