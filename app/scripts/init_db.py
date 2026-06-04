@@ -76,6 +76,17 @@ def init_tables():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
+
+    cur.execute("""
+        CREATE TABLE likes (
+            id         SERIAL PRIMARY KEY,
+            social_id  VARCHAR(255) NOT NULL,
+            provider   VARCHAR(20)  NOT NULL,
+            area_cd    VARCHAR(50)  REFERENCES seoul_spots(area_cd),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (social_id, provider, area_cd)
+        );
+    """)
     
     conn.commit() # 변경사항 확정
     
