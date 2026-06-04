@@ -2,6 +2,5 @@
 __pycache__/
 *.pyc
 .venv/
-mapping_result.csv
 *.pyo
 *.pyd
