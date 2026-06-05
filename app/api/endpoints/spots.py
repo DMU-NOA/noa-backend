@@ -7,15 +7,21 @@ from openai import OpenAI # 💡 AI 연결을 위해 추가된 모듈
 router = APIRouter()
 
 @router.get("/spots")
-def get_all_spots():
+def get_all_spots(lang: str = "ko"):
     conn = get_db()
     cur = conn.cursor()
     
-    # 💡 3개 테이블 JOIN + 혼잡도 최신 데이터 JOIN
-    query = """
+    # 💡 다국어 지원: lang이 'en'이면 영문 컬럼을, 아니면 국문 컬럼을 가져옴
+    name_col = "COALESCE(s.name_en, s.name)" if lang == "en" else "s.name"
+    cat_col = "COALESCE(s.category_en, s.category)" if lang == "en" else "s.category"
+    desc_col = "COALESCE(t.description_en, t.description)" if lang == "en" else "t.description"
+    addr_col = "COALESCE(t.address_en, t.address)" if lang == "en" else "t.address"
+    
+    # 3개 테이블 JOIN + 혼잡도 최신 데이터 JOIN
+    query = f"""
         SELECT 
-            s.area_cd, s.name, s.category, 
-            t.image_url, t.description, t.address, 
+            s.area_cd, {name_col}, {cat_col}, 
+            t.image_url, {desc_col}, {addr_col}, 
             t.mapx, t.mapy,
             c.congestion_level
         FROM seoul_spots s
@@ -55,45 +61,51 @@ def get_all_spots():
         conn.close()
 
 @router.get("/spots/search")
-def search_spots(keyword: str):
+def search_spots(keyword: str, lang: str = "ko"):
     conn = get_db()
     cur = conn.cursor()
     
-    # 1. 검색어 가공
     search_term = f"%{keyword}%"
     
-    # 2. 메인 검색 쿼리 (이름, 설명, 테마 검색)
-    search_query = """
-        SELECT s.area_cd, s.name, s.category, t.image_url, t.address, t.description, c.congestion_level
+    name_col = "COALESCE(s.name_en, s.name)" if lang == "en" else "s.name"
+    cat_col = "COALESCE(s.category_en, s.category)" if lang == "en" else "s.category"
+    desc_col = "COALESCE(t.description_en, t.description)" if lang == "en" else "t.description"
+    addr_col = "COALESCE(t.address_en, t.address)" if lang == "en" else "t.address"
+    
+    # 💡 검색은 한글이든 영어든 어느 컬럼에 걸려도 찾아지도록 확장!
+    search_query = f"""
+        SELECT s.area_cd, {name_col}, {cat_col}, t.image_url, {addr_col}, {desc_col}, c.congestion_level
         FROM seoul_spots s
         LEFT JOIN spot_mapping m ON s.area_cd = m.area_cd
         LEFT JOIN tour_spots t ON m.content_id = t.content_id
         LEFT JOIN congestion_data c ON s.area_cd = c.area_cd
-        WHERE s.name LIKE %s OR t.description LIKE %s OR s.category LIKE %s
+        WHERE s.name LIKE %s OR s.name_en ILIKE %s 
+           OR t.description LIKE %s OR t.description_en ILIKE %s 
+           OR s.category LIKE %s OR s.category_en ILIKE %s
         ORDER BY c.updated_at DESC
     """
     
-    # 3. 유사 테마 추천 쿼리 (가장 먼저 검색된 장소의 카테고리와 같은 것들)
-    recommend_query = """
-        SELECT s.area_cd, s.name, s.category, t.image_url, t.address
+    recommend_query = f"""
+        SELECT s.area_cd, {name_col}, {cat_col}, t.image_url, {addr_col}
         FROM seoul_spots s
         LEFT JOIN spot_mapping m ON s.area_cd = m.area_cd
         LEFT JOIN tour_spots t ON m.content_id = t.content_id
-        WHERE s.category = (SELECT category FROM seoul_spots WHERE name LIKE %s LIMIT 1)
-        AND s.name NOT LIKE %s
+        WHERE s.category = (
+            SELECT category FROM seoul_spots 
+            WHERE name LIKE %s OR name_en ILIKE %s LIMIT 1
+        )
+        AND s.name NOT LIKE %s AND (s.name_en IS NULL OR s.name_en NOT ILIKE %s)
         LIMIT 4
     """
     
     try:
-        # 메인 검색 실행
-        cur.execute(search_query, (search_term, search_term, search_term))
+        cur.execute(search_query, (search_term, search_term, search_term, search_term, search_term, search_term))
         rows = cur.fetchall()
         results = [{"area_cd": r[0], "name": r[1], "category": r[2], "image_url": r[3], "address": r[4], "description": r[5], "congestion_level": r[6]} for r in rows]
         
-        # 추천 검색 실행 (검색 결과가 있을 때만)
         recommendations = []
         if results:
-            cur.execute(recommend_query, (search_term, search_term))
+            cur.execute(recommend_query, (search_term, search_term, search_term, search_term))
             rec_rows = cur.fetchall()
             recommendations = [{"area_cd": r[0], "name": r[1], "category": r[2], "image_url": r[3], "address": r[4]} for r in rec_rows]
             
@@ -104,12 +116,17 @@ def search_spots(keyword: str):
         conn.close()
         
 @router.get("/spots/{area_cd}")
-def get_spot_detail(area_cd: str):
+def get_spot_detail(area_cd: str, lang: str = "ko"):
     conn = get_db()
     cur = conn.cursor()
     
-    query = """
-        SELECT s.area_cd, s.name, s.category, t.image_url, t.description, t.address, c.congestion_level
+    name_col = "COALESCE(s.name_en, s.name)" if lang == "en" else "s.name"
+    cat_col = "COALESCE(s.category_en, s.category)" if lang == "en" else "s.category"
+    desc_col = "COALESCE(t.description_en, t.description)" if lang == "en" else "t.description"
+    addr_col = "COALESCE(t.address_en, t.address)" if lang == "en" else "t.address"
+    
+    query = f"""
+        SELECT s.area_cd, {name_col}, {cat_col}, t.image_url, {desc_col}, {addr_col}, c.congestion_level
         FROM seoul_spots s
         LEFT JOIN spot_mapping m ON s.area_cd = m.area_cd
         LEFT JOIN tour_spots t ON m.content_id = t.content_id
@@ -138,15 +155,20 @@ def get_spot_detail(area_cd: str):
         cur.close()
         conn.close()
 
-# 💡 대안 장소 추천 API (AI 로직으로 완벽 교체 완료!)
+# 💡 대안 장소 추천 API
 @router.get("/spots/{area_cd}/alternatives")
-def get_alternatives(area_cd: str):
+def get_alternatives(area_cd: str, lang: str = "ko"):
     conn = get_db()
     cur = conn.cursor()
     try:
-        # 1. 사용자가 선택한 원래 장소의 정보(이름, 카테고리, 설명) 가져오기
-        cur.execute("""
-            SELECT s.name, s.category, t.description 
+        name_col = "COALESCE(s.name_en, s.name)" if lang == "en" else "s.name"
+        cat_col = "COALESCE(s.category_en, s.category)" if lang == "en" else "s.category"
+        desc_col = "COALESCE(t.description_en, t.description)" if lang == "en" else "t.description"
+        addr_col = "COALESCE(t.address_en, t.address)" if lang == "en" else "t.address"
+
+        # 1. 원래 장소의 정보 가져오기 (언어에 맞춰서 AI에게 넘겨줌)
+        cur.execute(f"""
+            SELECT {name_col}, {cat_col}, {desc_col} 
             FROM seoul_spots s
             LEFT JOIN spot_mapping m ON s.area_cd = m.area_cd
             LEFT JOIN tour_spots t ON m.content_id = t.content_id
@@ -159,11 +181,11 @@ def get_alternatives(area_cd: str):
             
         origin_name, origin_cat, origin_desc = origin
         origin_desc = origin_desc if origin_desc else ""
-        origin_info = f"이름: {origin_name}, 테마: {origin_cat}, 특징: {origin_desc[:100]}..."
+        origin_info = f"Name: {origin_name}, Theme: {origin_cat}, Feature: {origin_desc[:100]}..." if lang == "en" else f"이름: {origin_name}, 테마: {origin_cat}, 특징: {origin_desc[:100]}..."
 
-        # 2. 현재 혼잡도가 '여유' 또는 '보통'인 후보 장소들 싹 다 긁어오기
-        cur.execute("""
-            SELECT s.area_cd, s.name, s.category 
+        # 2. 혼잡도 여유/보통 후보군 조회
+        cur.execute(f"""
+            SELECT s.area_cd, {name_col}, {cat_col} 
             FROM seoul_spots s
             JOIN congestion_data c ON s.area_cd = c.area_cd
             WHERE c.congestion_level IN ('여유', '보통') 
@@ -174,24 +196,21 @@ def get_alternatives(area_cd: str):
         if not candidates:
             return []
 
-        # AI에게 먹여줄 텍스트로 변환
-        candidate_text = "\n".join([f"ID: {c[0]} | 이름: {c[1]} | 테마: {c[2]}" for c in candidates])
+        candidate_text = "\n".join([f"ID: {c[0]} | Name/이름: {c[1]} | Theme/테마: {c[2]}" for c in candidates])
 
-        # 3. OpenAI 호출하여 가장 분위기가 비슷한 곳 3~4개 추천받기
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         system_prompt = f"""
-        너는 여행 전문가야. 사용자가 가려던 목적지가 너무 붐벼서 대안 장소를 찾고 있어.
-        목적지의 테마, 분위기, 특징을 분석해서 아래 [후보 리스트] 중 가장 유사성이 높은 장소 딱 4개만 골라줘.
+        You are a travel expert. The user's destination is crowded, so recommend exactly 4 alternatives from the [Candidate List] that have the most similar vibe, theme, and features.
         
-        [목적지 정보]
+        [Target Destination]
         {origin_info}
 
-        [후보 리스트]
+        [Candidate List]
         {candidate_text}
 
-        규칙:
-        1. 반드시 [후보 리스트]에 있는 ID만 고를 것.
-        2. 다른 설명은 일절 하지 말고, 쉼표로 구분된 ID 4개만 텍스트로 출력할 것. (예: POI002, POI015, POI102, POI111)
+        Rules:
+        1. Select ONLY IDs from the [Candidate List].
+        2. DO NOT provide any other explanation. Just output 4 IDs separated by commas (e.g., POI002, POI015, POI102, POI111).
         """
 
         response = client.chat.completions.create(
@@ -199,14 +218,12 @@ def get_alternatives(area_cd: str):
             messages=[{"role": "system", "content": system_prompt}]
         )
         
-        # AI가 뽑아준 ID 파싱 ("POI001, POI045...")
         ai_reply = response.choices[0].message.content
         selected_ids = [aid.strip() for aid in ai_reply.split(",") if aid.strip()]
 
-        # 4. 뽑힌 장소들의 상세 정보를 DB에서 다시 조회하여 프론트엔드에 전달
         if selected_ids:
-            cur.execute("""
-                SELECT s.area_cd, s.name, s.category, t.image_url, t.description, t.address, c.congestion_level
+            cur.execute(f"""
+                SELECT s.area_cd, {name_col}, {cat_col}, t.image_url, {desc_col}, {addr_col}, c.congestion_level
                 FROM seoul_spots s
                 LEFT JOIN spot_mapping m ON s.area_cd = m.area_cd
                 LEFT JOIN tour_spots t ON m.content_id = t.content_id
@@ -228,17 +245,15 @@ def get_alternatives(area_cd: str):
         conn.close()
 
 @router.get("/spots/{spot_id}/forecast")
-def get_spot_forecast(spot_id: str):
+def get_spot_forecast(spot_id: str, lang: str = "ko"):
     try:
-        # 💡 서울시 API 키를 사용합니다. (.env 파일에 SEOUL_API_KEY가 있어야 합니다)
         SEOUL_API_KEY = os.getenv("SEOUL_API_KEY")
         if not SEOUL_API_KEY:
             raise ValueError("SEOUL_API_KEY가 설정되지 않았습니다.")
 
-        # 💡 프론트엔드에서 넘어온 spot_id (예: POI009)를 그대로 URL에 넣습니다. (매핑 필요 없음!)
-        url = f"http://openapi.seoul.go.kr:8088/{SEOUL_API_KEY}/json/citydata/1/5/{spot_id}"
-        
-        print(f"📡 [시간별 예측 API] 서울시 데이터 요청 중... ID: {spot_id}")
+        # 💡 다국어 지원: 언어에 따라 국문/영문 API 엔드포인트 분기처리!
+        seoul_api_type = "citydata_eng" if lang == "en" else "citydata"
+        url = f"http://openapi.seoul.go.kr:8088/{SEOUL_API_KEY}/json/{seoul_api_type}/1/5/{spot_id}"
         
         res = requests.get(url, timeout=10)
         data = res.json()
@@ -254,19 +269,17 @@ def get_spot_forecast(spot_id: str):
         fcst_data = live_ppltn[0].get("FCST_PPLTN", [])
         forecast_list = []
         
-        # 💡 12시간 예측 데이터를 프론트엔드 차트용으로 가공합니다.
         for fcst in fcst_data:
             time_str = fcst.get("FCST_TIME", "")
-            hour_label = time_str.split(" ")[1].split(":")[0] + "시" if time_str else ""
+            hour_label = time_str.split(" ")[1].split(":")[0] + ("시" if lang == "ko" else ":00") if time_str else ""
             
+            # 영문 API는 Crowded, Normal 등으로 옵니다.
             lvl = fcst.get("FCST_CONGEST_LVL", "여유")
-            
-            # 💡 [핵심] 억지 비율 대신 '실제 최대 예측 인구수'를 추출합니다.
             pop = int(fcst.get("FCST_PPLTN_MAX", 0)) 
                 
             forecast_list.append({
                 "time": hour_label,
-                "population": pop,  # 프론트엔드로 실제 인구수 전달
+                "population": pop,
                 "level": lvl
             })
 
@@ -277,12 +290,12 @@ def get_spot_forecast(spot_id: str):
         return {"forecast": []}
 
 @router.get("/spots/{spot_id}/additional-info")
-def get_spot_additional_info(spot_id: str):
+def get_spot_additional_info(spot_id: str, lang: str = "ko"):
     try:
         SEOUL_API_KEY = os.getenv("SEOUL_API_KEY")
-        url = f"http://openapi.seoul.go.kr:8088/{SEOUL_API_KEY}/json/citydata/1/5/{spot_id}"
+        seoul_api_type = "citydata_eng" if lang == "en" else "citydata"
+        url = f"http://openapi.seoul.go.kr:8088/{SEOUL_API_KEY}/json/{seoul_api_type}/1/5/{spot_id}"
         
-        print(f"📡 [부가정보 API - 상세버전] 서울시 데이터 요청 중... ID: {spot_id}")
         res = requests.get(url, timeout=10)
         data = res.json()
         citydata = data.get("CITYDATA", {})
@@ -295,42 +308,39 @@ def get_spot_additional_info(spot_id: str):
         weather = None
         if weather_data:
             w = weather_data[0]
-            
-            # 24시간 예보 추출
             fcst24_raw = w.get("FCST24HOURS", [])
             if isinstance(fcst24_raw, dict): fcst24_raw = [fcst24_raw]
             
             fcst24 = []
             for f in fcst24_raw:
                 time_str = str(f.get("FCST_DT", ""))
-                # YYYYMMDDHHMM 형식에서 HH시 추출
-                hour = time_str[8:10] + "시" if len(time_str) >= 10 else "-"
+                hour = time_str[8:10] + ("시" if lang == "ko" else ":00") if len(time_str) >= 10 else "-"
                 fcst24.append({
                     "time": hour,
                     "temp": f.get("TEMP", "-"),
-                    "sky": f.get("SKY_STTS", "맑음"),
+                    "sky": f.get("SKY_STTS", "Clear"),
                     "rain_chance": f.get("RAIN_CHANCE", "0")
                 })
 
             weather = {
                 "temp": w.get("TEMP", "-"),
-                "pm10": w.get("PM10_INDEX", "보통"),
-                "pm10_val": w.get("PM10", "-"), # 실제 수치
-                "pm25": w.get("PM25_INDEX", "보통"),
-                "pm25_val": w.get("PM25", "-"), # 실제 수치
+                "pm10": w.get("PM10_INDEX", "-"),
+                "pm10_val": w.get("PM10", "-"), 
+                "pm25": w.get("PM25_INDEX", "-"),
+                "pm25_val": w.get("PM25", "-"), 
                 "humidity": w.get("HUMIDITY", "-"),
-                "msg": w.get("PCP_MSG", "맑음"),
+                "msg": w.get("PCP_MSG", "") if lang == "en" else w.get("WEATHER_MSG", "맑음"),
                 "forecast24": fcst24
             }
 
         # 2. 🚗 상세 교통 및 주차 현황
         traffic_data = citydata.get("ROAD_TRAFFIC_STTS", {})
         traffic = {
-            "msg": "주변 도로 소통 정보가 없습니다.",
+            "msg": "No traffic info." if lang == "en" else "주변 도로 소통 정보가 없습니다.",
             "speed": "-"
         }
         if isinstance(traffic_data, dict) and "AVG_ROAD_DATA" in traffic_data:
-            traffic["msg"] = traffic_data["AVG_ROAD_DATA"].get("ROAD_MSG", "원활")
+            traffic["msg"] = traffic_data["AVG_ROAD_DATA"].get("ROAD_MSG", "Smooth" if lang == "en" else "원활")
             traffic["speed"] = traffic_data["AVG_ROAD_DATA"].get("ROAD_TRAFFIC_SPD", "-")
 
         parking_data = citydata.get("PRK_STTS", [])
@@ -341,12 +351,12 @@ def get_spot_additional_info(spot_id: str):
             if p.get("PRK_NM"):
                 parking_lots.append({
                     "name": p.get("PRK_NM"),
-                    "cur": p.get("CUR_PRK_CNT", 0), # 빈자리
-                    "max": p.get("CPCTY", 0),       # 총 주차면
-                    "fee": p.get("RATES", 0)        # 기본요금
+                    "cur": p.get("CUR_PRK_CNT", 0),
+                    "max": p.get("CPCTY", 0),       
+                    "fee": p.get("RATES", 0)        
                 })
 
-        # 3. 🎪 문화/행사/축제 (기존과 동일)
+        # 3. 🎪 문화/행사/축제
         event_data = citydata.get("CULTURALEVENTINFO", [])
         if isinstance(event_data, dict): event_data = [event_data]
             
