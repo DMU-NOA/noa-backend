@@ -5,8 +5,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# 서울시 API 키 (실시간 혼잡도는 보통 TourAPI와 키가 다를 수 있으니 확인 필요)
-SEOUL_API_KEY = os.getenv("SEOUL_API_KEY") 
+SEOUL_API_KEY = os.getenv("SEOUL_API_KEY")
 
 def fetch_congestion():
     conn = psycopg2.connect(
@@ -15,39 +14,73 @@ def fetch_congestion():
     )
     cur = conn.cursor()
     
+    # 💡 1. 영문 혼잡도를 저장할 빈칸(컬럼)이 없다면 알아서 추가합니다.
+    print("1️⃣ DB 구조 확인 및 다국어(한/영) 컬럼 생성 중...")
+    cur.execute("""
+        ALTER TABLE congestion_data ADD COLUMN IF NOT EXISTS congestion_level_en VARCHAR(50);
+        ALTER TABLE congestion_data ADD COLUMN IF NOT EXISTS congestion_msg TEXT;
+        ALTER TABLE congestion_data ADD COLUMN IF NOT EXISTS congestion_msg_en TEXT;
+    """)
+    conn.commit()
+    
     # 모든 장소 리스트 가져오기
     cur.execute("SELECT area_cd, name FROM seoul_spots")
     spots = cur.fetchall()
     
-    print(f"⏳ {len(spots)}개 장소 실시간 혼잡도 업데이트 시작...")
+    print(f"\n⏳ {len(spots)}개 장소 실시간 다국어(한/영) 혼잡도 업데이트 시작...\n")
     
-    for area_cd, name in spots:
-        # 실제 서울시 실시간 도시데이터 API 호출 (URL은 실제 API 문서에 맞춰 수정하세요)
-        url = f"http://openapi.seoul.go.kr:8088/{SEOUL_API_KEY}/json/citydata/1/5/{area_cd}"
+    for idx, (area_cd, name) in enumerate(spots, 1):
+        print(f"👉 [{idx}/{len(spots)}] {name} 실시간 데이터 요청 중...", end=" ", flush=True)
+        
+        # 💡 서울시 실시간 API 국문/영문 엔드포인트
+        kr_url = f"http://openapi.seoul.go.kr:8088/{SEOUL_API_KEY}/json/citydata/1/5/{area_cd}"
+        en_url = f"http://openapi.seoul.go.kr:8088/{SEOUL_API_KEY}/json/citydata_eng/1/5/{area_cd}"
+        
+        kr_lvl, kr_msg = "정보없음", ""
+        en_lvl, en_msg = "No Data", ""
         
         try:
-            res = requests.get(url, timeout=5)
-            data = res.json()
-            
-            # API에서 혼잡도 정보 추출 (구조는 API 문서에 따라 다를 수 있음)
-            # 예: data['CITYDATA']['LIVE_PPLTN_STTS'][0]['AREA_CONGEST_LVL']
-            congestion = data.get('CITYDATA', {}).get('LIVE_PPLTN_STTS', [{}])[0].get('AREA_CONGEST_LVL', '알 수 없음')
-            
-            # DB 저장
+            # 2. 🇰🇷 국문 데이터 조회
+            res_kr = requests.get(kr_url, timeout=10)
+            try:
+                data_kr = res_kr.json()
+                ppltn_kr = data_kr.get('CITYDATA', {}).get('LIVE_PPLTN_STTS', [])
+                if isinstance(ppltn_kr, dict): ppltn_kr = [ppltn_kr] # API 응답 형태 예외처리
+                if ppltn_kr:
+                    kr_lvl = ppltn_kr[0].get('AREA_CONGEST_LVL', '정보없음')
+                    kr_msg = ppltn_kr[0].get('AREA_CONGEST_MSG', '')
+            except Exception:
+                pass 
+
+            # 3. 🇺🇸 영문 데이터 조회
+            res_en = requests.get(en_url, timeout=10)
+            try:
+                data_en = res_en.json()
+                ppltn_en = data_en.get('CITYDATA', {}).get('LIVE_PPLTN_STTS', [])
+                if isinstance(ppltn_en, dict): ppltn_en = [ppltn_en]
+                if ppltn_en:
+                    en_lvl = ppltn_en[0].get('AREA_CONGEST_LVL', 'No Data')
+                    en_msg = ppltn_en[0].get('AREA_CONGEST_MSG', '')
+            except Exception:
+                pass
+
+            # 4. DB에 한/영 동시 저장
             cur.execute("""
-                INSERT INTO congestion_data (area_cd, congestion_level)
-                VALUES (%s, %s)
-            """, (area_cd, congestion))
+                INSERT INTO congestion_data 
+                (area_cd, congestion_level, congestion_level_en, congestion_msg, congestion_msg_en)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (area_cd, kr_lvl, en_lvl, kr_msg, en_msg))
             
-            print(f"✅ [{name}] 혼잡도: {congestion}")
+            conn.commit()
+            print(f"✅ 완료! (KR: {kr_lvl} / EN: {en_lvl})")
             
         except Exception as e:
-            print(f"⚠️ [{name}] 실패: {e}")
+            print(f"❌ [에러 발생]: {e}")
+            conn.rollback()
             
-    conn.commit()
     cur.close()
     conn.close()
-    print("🎉 혼잡도 업데이트 완료!")
+    print("\n🎉 다국어(한/영) 실시간 혼잡도 업데이트 종료!")
 
 if __name__ == "__main__":
     fetch_congestion()
