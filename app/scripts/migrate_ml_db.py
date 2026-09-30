@@ -1,53 +1,28 @@
-import os
-import psycopg2
-
 from pathlib import Path
-from dotenv import load_dotenv
 
-load_dotenv()
-
-
-def get_db():
-    return psycopg2.connect(
-        host=os.getenv("DB_HOST"),
-        database=os.getenv("DB_NAME"),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD")
-    )
+from app.scripts.db import get_db
 
 
 def migrate():
-    base_dir = Path(__file__).resolve().parent.parent
-    sql_path = base_dir / "db" / "add_ml_tables.sql"
+    # app/scripts/migrate_ml_db.py -> app/db/add_ml_tables.sql
+    app_dir = Path(__file__).resolve().parent.parent
+    sql_path = app_dir / "db" / "add_ml_tables.sql"
 
     if not sql_path.exists():
-        raise FileNotFoundError(
-            f"SQL 파일을 찾을 수 없습니다: {sql_path}"
-        )
+        raise FileNotFoundError(f"SQL 파일을 찾을 수 없습니다: {sql_path}")
 
-    with open(sql_path, "r", encoding="utf-8") as f:
-        sql = f.read()
-
+    sql = sql_path.read_text(encoding="utf-8")
     conn = get_db()
 
     try:
         with conn.cursor() as cur:
-            print("DB 마이그레이션 시작...")
-
+            print("DB ML 마이그레이션 시작...")
             cur.execute(sql)
-
         conn.commit()
-
-        print("DB 마이그레이션 완료!")
-
-    except Exception as e:
+        print("✅ DB ML 마이그레이션 완료")
+    except Exception:
         conn.rollback()
-
-        print("DB 마이그레이션 실패")
-        print(e)
-
         raise
-
     finally:
         conn.close()
 

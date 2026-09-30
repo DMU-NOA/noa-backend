@@ -4,6 +4,7 @@ import pandas as pd
 import psycopg2
 
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -11,6 +12,8 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "congestion_model.pkl"
+
+KST = ZoneInfo("Asia/Seoul")
 
 LABEL_NAMES = {
     0: "여유",
@@ -76,7 +79,7 @@ def test_prediction():
             mapy
         ) = spot
 
-        now = datetime.now()
+        now = datetime.now(KST)
 
         hour = now.hour
 

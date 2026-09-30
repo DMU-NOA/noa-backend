@@ -163,23 +163,21 @@ def build_training_dataset():
         print(f"저장 위치: {output_path}")
         print("=================================")
 
-        # 혼잡도 클래스별 개수 확인
-        cur.execute("""
-            SELECT
-                congestion_level,
-                congestion_label,
-                COUNT(*)
+        # 실제 CSV에 포함된 rows 기준 클래스 분포 출력
+        distribution_map = {}
+        for row in rows:
+            level = row[-2]
+            label = row[-1]
+            key = (level, label)
+            distribution_map[key] = distribution_map.get(key, 0) + 1
 
-            FROM congestion_training_data
-
-            GROUP BY
-                congestion_level,
-                congestion_label
-
-            ORDER BY congestion_label
-        """)
-
-        distributions = cur.fetchall()
+        distributions = [
+            (level, label, count)
+            for (level, label), count in sorted(
+                distribution_map.items(),
+                key=lambda item: item[0][1]
+            )
+        ]
 
         print()
         print("혼잡도 분포")

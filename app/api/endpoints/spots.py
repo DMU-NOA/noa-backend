@@ -10,52 +10,122 @@ router = APIRouter()
 def get_all_spots(lang: str = "ko"):
     conn = get_db()
     cur = conn.cursor()
-    
-    # 💡 다국어 지원: lang이 'en'이면 영문 컬럼을, 아니면 국문 컬럼을 가져옴
-    name_col = "COALESCE(s.name_en, s.name)" if lang == "en" else "s.name"
-    cat_col = "COALESCE(s.category_en, s.category)" if lang == "en" else "s.category"
-    desc_col = "COALESCE(t.description_en, t.description)" if lang == "en" else "t.description"
-    addr_col = "COALESCE(t.address_en, t.address)" if lang == "en" else "t.address"
-    
-    # 3개 테이블 JOIN + 혼잡도 최신 데이터 JOIN
-    query = f"""
-        SELECT 
-            s.area_cd, {name_col}, {cat_col}, 
-            t.image_url, {desc_col}, {addr_col}, 
-            t.mapx, t.mapy,
-            c.congestion_level
-        FROM seoul_spots s
-        LEFT JOIN spot_mapping m ON s.area_cd = m.area_cd
-        LEFT JOIN tour_spots t ON m.content_id = t.content_id
-        LEFT JOIN (
-            SELECT DISTINCT ON (area_cd) area_cd, congestion_level 
-            FROM congestion_data 
-            ORDER BY area_cd, updated_at DESC
-        ) c ON s.area_cd = c.area_cd;
-    """
-    
+
     try:
+        if lang == "en":
+            name_col = """
+                CASE
+                    WHEN l.source = 'actual'
+                    THEN COALESCE(s.name_en, s.name, t.name_en, t.name)
+                    ELSE COALESCE(t.name_en, t.name)
+                END
+            """
+
+            cat_col = """
+                CASE
+                    WHEN l.source = 'actual'
+                    THEN COALESCE(s.category_en, s.category, t.category)
+                    ELSE t.category
+                END
+            """
+
+            desc_col = "COALESCE(t.description_en, t.description)"
+            addr_col = "COALESCE(t.address_en, t.address)"
+
+        else:
+            name_col = """
+                CASE
+                    WHEN l.source = 'actual'
+                    THEN COALESCE(s.name, t.name)
+                    ELSE t.name
+                END
+            """
+
+            cat_col = """
+                CASE
+                    WHEN l.source = 'actual'
+                    THEN COALESCE(s.category, t.category)
+                    ELSE t.category
+                END
+            """
+
+            desc_col = "t.description"
+            addr_col = "t.address"
+
+        query = f"""
+            SELECT
+                COALESCE(l.area_cd, t.content_id) AS spot_id,
+
+                l.area_cd,
+                t.content_id,
+
+                {name_col} AS name,
+                {cat_col} AS category,
+
+                t.image_url,
+                {desc_col} AS description,
+                {addr_col} AS address,
+
+                t.mapx,
+                t.mapy,
+
+                l.congestion_level,
+                l.source,
+                l.updated_at
+
+            FROM latest_congestion l
+
+            JOIN tour_spots t
+                ON l.content_id = t.content_id
+
+            LEFT JOIN seoul_spots s
+                ON l.area_cd = s.area_cd
+
+            ORDER BY name
+        """
+
         cur.execute(query)
         rows = cur.fetchall()
-        
+
         results = []
+
         for row in rows:
             results.append({
-                "area_cd": row[0],
-                "name": row[1],
-                "category": row[2],
-                "image_url": row[3],
-                "description": row[4],
-                "address": row[5],
-                "mapx": float(row[6]) if row[6] else 0.0,
-                "mapy": float(row[7]) if row[7] else 0.0,
-                "congestion_level": row[8] if row[8] else "데이터 없음"
+                "spot_id": row[0],
+                "area_cd": row[1],
+                "content_id": row[2],
+
+                "name": row[3],
+                "category": row[4],
+
+                "image_url": row[5],
+                "description": row[6],
+                "address": row[7],
+
+                "mapx": float(row[8]) if row[8] else 0.0,
+                "mapy": float(row[9]) if row[9] else 0.0,
+
+                "congestion_level": row[10] or "데이터 없음",
+                "congestion_source": row[11],
+
+                "updated_at": (
+                    row[12].isoformat()
+                    if row[12]
+                    else None
+                )
             })
-        return {"data": results}
-    
+
+        return {
+            "count": len(results),
+            "data": results
+        }
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
     finally:
         cur.close()
         conn.close()
@@ -64,182 +134,569 @@ def get_all_spots(lang: str = "ko"):
 def search_spots(keyword: str, lang: str = "ko"):
     conn = get_db()
     cur = conn.cursor()
-    
-    search_term = f"%{keyword}%"
-    
-    name_col = "COALESCE(s.name_en, s.name)" if lang == "en" else "s.name"
-    cat_col = "COALESCE(s.category_en, s.category)" if lang == "en" else "s.category"
-    desc_col = "COALESCE(t.description_en, t.description)" if lang == "en" else "t.description"
-    addr_col = "COALESCE(t.address_en, t.address)" if lang == "en" else "t.address"
-    
-    # 💡 검색은 한글이든 영어든 어느 컬럼에 걸려도 찾아지도록 확장!
-    search_query = f"""
-        SELECT s.area_cd, {name_col}, {cat_col}, t.image_url, {addr_col}, {desc_col}, c.congestion_level
-        FROM seoul_spots s
-        LEFT JOIN spot_mapping m ON s.area_cd = m.area_cd
-        LEFT JOIN tour_spots t ON m.content_id = t.content_id
-        LEFT JOIN congestion_data c ON s.area_cd = c.area_cd
-        WHERE s.name LIKE %s OR s.name_en ILIKE %s 
-           OR t.description LIKE %s OR t.description_en ILIKE %s 
-           OR s.category LIKE %s OR s.category_en ILIKE %s
-        ORDER BY c.updated_at DESC
-    """
-    
-    recommend_query = f"""
-        SELECT s.area_cd, {name_col}, {cat_col}, t.image_url, {addr_col}
-        FROM seoul_spots s
-        LEFT JOIN spot_mapping m ON s.area_cd = m.area_cd
-        LEFT JOIN tour_spots t ON m.content_id = t.content_id
-        WHERE s.category = (
-            SELECT category FROM seoul_spots 
-            WHERE name LIKE %s OR name_en ILIKE %s LIMIT 1
-        )
-        AND s.name NOT LIKE %s AND (s.name_en IS NULL OR s.name_en NOT ILIKE %s)
-        LIMIT 4
-    """
-    
+
     try:
-        cur.execute(search_query, (search_term, search_term, search_term, search_term, search_term, search_term))
+        search_term = f"%{keyword}%"
+
+        if lang == "en":
+            name_col = """
+                CASE
+                    WHEN l.source = 'actual'
+                    THEN COALESCE(s.name_en, s.name, t.name_en, t.name)
+                    ELSE COALESCE(t.name_en, t.name)
+                END
+            """
+
+            desc_col = "COALESCE(t.description_en, t.description)"
+            addr_col = "COALESCE(t.address_en, t.address)"
+
+        else:
+            name_col = """
+                CASE
+                    WHEN l.source = 'actual'
+                    THEN COALESCE(s.name, t.name)
+                    ELSE t.name
+                END
+            """
+
+            desc_col = "t.description"
+            addr_col = "t.address"
+
+        query = f"""
+            SELECT
+                COALESCE(l.area_cd, t.content_id) AS spot_id,
+                l.area_cd,
+                t.content_id,
+
+                {name_col} AS name,
+                COALESCE(s.category, t.category) AS category,
+
+                t.image_url,
+                {desc_col} AS description,
+                {addr_col} AS address,
+
+                t.mapx,
+                t.mapy,
+
+                l.congestion_level,
+                l.source
+
+            FROM latest_congestion l
+
+            JOIN tour_spots t
+                ON l.content_id = t.content_id
+
+            LEFT JOIN seoul_spots s
+                ON l.area_cd = s.area_cd
+
+            WHERE
+                COALESCE(s.name, '') ILIKE %s
+                OR COALESCE(s.name_en, '') ILIKE %s
+                OR COALESCE(t.name, '') ILIKE %s
+                OR COALESCE(t.name_en, '') ILIKE %s
+                OR COALESCE(t.description, '') ILIKE %s
+                OR COALESCE(t.description_en, '') ILIKE %s
+                OR COALESCE(s.category, '') ILIKE %s
+                OR COALESCE(t.category, '') ILIKE %s
+
+            ORDER BY name
+        """
+
+        cur.execute(
+            query,
+            (
+                search_term,
+                search_term,
+                search_term,
+                search_term,
+                search_term,
+                search_term,
+                search_term,
+                search_term,
+            )
+        )
+
         rows = cur.fetchall()
-        results = [{"area_cd": r[0], "name": r[1], "category": r[2], "image_url": r[3], "address": r[4], "description": r[5], "congestion_level": r[6]} for r in rows]
-        
-        recommendations = []
-        if results:
-            cur.execute(recommend_query, (search_term, search_term, search_term, search_term))
-            rec_rows = cur.fetchall()
-            recommendations = [{"area_cd": r[0], "name": r[1], "category": r[2], "image_url": r[3], "address": r[4]} for r in rec_rows]
-            
-        return {"results": results, "recommendations": recommendations}
-        
+
+        results = []
+
+        for row in rows:
+            results.append({
+                "spot_id": row[0],
+                "area_cd": row[1],
+                "content_id": row[2],
+
+                "name": row[3],
+                "category": row[4],
+
+                "image_url": row[5],
+                "description": row[6],
+                "address": row[7],
+
+                "mapx": float(row[8]) if row[8] else 0.0,
+                "mapy": float(row[9]) if row[9] else 0.0,
+
+                "congestion_level": row[10] or "데이터 없음",
+                "congestion_source": row[11],
+            })
+
+        return {
+            "results": results,
+            "recommendations": []
+        }
+
     finally:
         cur.close()
         conn.close()
         
-@router.get("/spots/{area_cd}")
-def get_spot_detail(area_cd: str, lang: str = "ko"):
+@router.get("/spots/{spot_id}")
+def get_spot_detail(spot_id: str, lang: str = "ko"):
     conn = get_db()
     cur = conn.cursor()
-    
-    name_col = "COALESCE(s.name_en, s.name)" if lang == "en" else "s.name"
-    cat_col = "COALESCE(s.category_en, s.category)" if lang == "en" else "s.category"
-    desc_col = "COALESCE(t.description_en, t.description)" if lang == "en" else "t.description"
-    addr_col = "COALESCE(t.address_en, t.address)" if lang == "en" else "t.address"
-    
-    query = f"""
-        SELECT s.area_cd, {name_col}, {cat_col}, t.image_url, {desc_col}, {addr_col}, c.congestion_level
-        FROM seoul_spots s
-        LEFT JOIN spot_mapping m ON s.area_cd = m.area_cd
-        LEFT JOIN tour_spots t ON m.content_id = t.content_id
-        LEFT JOIN congestion_data c ON s.area_cd = c.area_cd
-        WHERE s.area_cd = %s
-        ORDER BY c.updated_at DESC LIMIT 1;
-    """
-    
+
     try:
-        cur.execute(query, (area_cd,))
+        if lang == "en":
+            name_col = """
+                CASE
+                    WHEN l.source = 'actual'
+                    THEN COALESCE(s.name_en, s.name, t.name_en, t.name)
+                    ELSE COALESCE(t.name_en, t.name)
+                END
+            """
+
+            cat_col = """
+                CASE
+                    WHEN l.source = 'actual'
+                    THEN COALESCE(s.category_en, s.category, t.category)
+                    ELSE t.category
+                END
+            """
+
+            desc_col = "COALESCE(t.description_en, t.description)"
+            addr_col = "COALESCE(t.address_en, t.address)"
+
+        else:
+            name_col = """
+                CASE
+                    WHEN l.source = 'actual'
+                    THEN COALESCE(s.name, t.name)
+                    ELSE t.name
+                END
+            """
+
+            cat_col = """
+                CASE
+                    WHEN l.source = 'actual'
+                    THEN COALESCE(s.category, t.category)
+                    ELSE t.category
+                END
+            """
+
+            desc_col = "t.description"
+            addr_col = "t.address"
+
+        query = f"""
+            SELECT
+                COALESCE(l.area_cd, t.content_id) AS spot_id,
+
+                l.area_cd,
+                t.content_id,
+
+                {name_col} AS name,
+                {cat_col} AS category,
+
+                t.image_url,
+                {desc_col} AS description,
+                {addr_col} AS address,
+
+                t.mapx,
+                t.mapy,
+
+                l.congestion_level,
+                l.source,
+                l.updated_at
+
+            FROM latest_congestion l
+
+            JOIN tour_spots t
+                ON l.content_id = t.content_id
+
+            LEFT JOIN seoul_spots s
+                ON l.area_cd = s.area_cd
+
+            WHERE
+                (
+                    l.source = 'actual'
+                    AND l.area_cd = %s
+                )
+
+                OR
+
+                (
+                    l.source = 'predicted'
+                    AND t.content_id = %s
+                )
+
+            LIMIT 1
+        """
+
+        cur.execute(
+            query,
+            (
+                spot_id,
+                spot_id
+            )
+        )
+
         row = cur.fetchone()
-        
+
         if not row:
-            raise HTTPException(status_code=404, detail="Spot not found")
-            
+            raise HTTPException(
+                status_code=404,
+                detail="Spot not found"
+            )
+
         return {
-            "area_cd": row[0],
-            "name": row[1],
-            "category": row[2],
-            "image_url": row[3],
-            "description": row[4],
-            "address": row[5],
-            "congestion_level": row[6] if row[6] else "데이터 없음"
+            "spot_id": row[0],
+            "area_cd": row[1],
+            "content_id": row[2],
+
+            "name": row[3],
+            "category": row[4],
+
+            "image_url": row[5],
+            "description": row[6],
+            "address": row[7],
+
+            "mapx": float(row[8]) if row[8] else 0.0,
+            "mapy": float(row[9]) if row[9] else 0.0,
+
+            "congestion_level": row[10] or "데이터 없음",
+            "congestion_source": row[11],
+
+            "updated_at": (
+                row[12].isoformat()
+                if row[12]
+                else None
+            )
         }
+
     finally:
         cur.close()
         conn.close()
 
 # 💡 대안 장소 추천 API
-@router.get("/spots/{area_cd}/alternatives")
-def get_alternatives(area_cd: str, lang: str = "ko"):
+@router.get("/spots/{spot_id}/alternatives")
+def get_alternatives(spot_id: str, lang: str = "ko"):
     conn = get_db()
     cur = conn.cursor()
+
     try:
-        name_col = "COALESCE(s.name_en, s.name)" if lang == "en" else "s.name"
-        cat_col = "COALESCE(s.category_en, s.category)" if lang == "en" else "s.category"
-        desc_col = "COALESCE(t.description_en, t.description)" if lang == "en" else "t.description"
-        addr_col = "COALESCE(t.address_en, t.address)" if lang == "en" else "t.address"
+        # actual: spot_id = area_cd
+        # predicted: spot_id = content_id
+        if lang == "en":
+            name_expr = """
+                CASE
+                    WHEN l.source = 'actual'
+                    THEN COALESCE(s.name_en, s.name, t.name_en, t.name)
+                    ELSE COALESCE(t.name_en, t.name)
+                END
+            """
+            category_expr = """
+                CASE
+                    WHEN l.source = 'actual'
+                    THEN COALESCE(s.category_en, s.category, t.category)
+                    ELSE t.category
+                END
+            """
+            description_expr = "COALESCE(t.description_en, t.description)"
+            address_expr = "COALESCE(t.address_en, t.address)"
+        else:
+            name_expr = """
+                CASE
+                    WHEN l.source = 'actual'
+                    THEN COALESCE(s.name, t.name)
+                    ELSE t.name
+                END
+            """
+            category_expr = """
+                CASE
+                    WHEN l.source = 'actual'
+                    THEN COALESCE(s.category, t.category)
+                    ELSE t.category
+                END
+            """
+            description_expr = "t.description"
+            address_expr = "t.address"
 
-        # 1. 원래 장소의 정보 가져오기 (언어에 맞춰서 AI에게 넘겨줌)
-        cur.execute(f"""
-            SELECT {name_col}, {cat_col}, {desc_col} 
-            FROM seoul_spots s
-            LEFT JOIN spot_mapping m ON s.area_cd = m.area_cd
-            LEFT JOIN tour_spots t ON m.content_id = t.content_id
-            WHERE s.area_cd = %s
-        """, (area_cd,))
+        # 1. 기준 관광지 조회
+        cur.execute(
+            f"""
+            SELECT
+                CASE
+                    WHEN l.source = 'actual'
+                    THEN l.area_cd
+                    ELSE l.content_id
+                END AS spot_id,
+                l.area_cd,
+                l.content_id,
+                {name_expr} AS name,
+                {category_expr} AS category,
+                {description_expr} AS description,
+                t.mapx,
+                t.mapy
+            FROM latest_congestion l
+            JOIN tour_spots t
+                ON l.content_id = t.content_id
+            LEFT JOIN seoul_spots s
+                ON l.area_cd = s.area_cd
+            WHERE
+                (
+                    (l.source = 'actual' AND l.area_cd = %s)
+                    OR
+                    (l.source = 'predicted' AND l.content_id = %s)
+                )
+            LIMIT 1
+            """,
+            (spot_id, spot_id)
+        )
+
         origin = cur.fetchone()
-        
+
         if not origin:
-            return []
-            
-        origin_name, origin_cat, origin_desc = origin
-        origin_desc = origin_desc if origin_desc else ""
-        origin_info = f"Name: {origin_name}, Theme: {origin_cat}, Feature: {origin_desc[:100]}..." if lang == "en" else f"이름: {origin_name}, 테마: {origin_cat}, 특징: {origin_desc[:100]}..."
+            return {"alternatives": []}
 
-        # 2. 혼잡도 여유/보통 후보군 조회
-        cur.execute(f"""
-            SELECT s.area_cd, {name_col}, {cat_col} 
-            FROM seoul_spots s
-            JOIN congestion_data c ON s.area_cd = c.area_cd
-            WHERE c.congestion_level IN ('여유', '보통') 
-            AND s.area_cd != %s
-        """, (area_cd,))
-        candidates = cur.fetchall()
+        (
+            origin_spot_id,
+            origin_area_cd,
+            origin_content_id,
+            origin_name,
+            origin_category,
+            origin_description,
+            origin_mapx,
+            origin_mapy
+        ) = origin
 
-        if not candidates:
-            return []
+        # 2. 후보군 조회
+        # 같은 카테고리 우선 + 여유/보통 우선.
+        # 좌표가 있으면 가까운 순으로 정렬하고,
+        # 좌표가 없는 경우에도 추천 자체는 동작하도록 처리.
+        origin_x = float(origin_mapx) if origin_mapx is not None else None
+        origin_y = float(origin_mapy) if origin_mapy is not None else None
 
-        candidate_text = "\n".join([f"ID: {c[0]} | Name/이름: {c[1]} | Theme/테마: {c[2]}" for c in candidates])
-
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        system_prompt = f"""
-        You are a travel expert. The user's destination is crowded, so recommend exactly 4 alternatives from the [Candidate List] that have the most similar vibe, theme, and features.
-        
-        [Target Destination]
-        {origin_info}
-
-        [Candidate List]
-        {candidate_text}
-
-        Rules:
-        1. Select ONLY IDs from the [Candidate List].
-        2. DO NOT provide any other explanation. Just output 4 IDs separated by commas (e.g., POI002, POI015, POI102, POI111).
+        distance_order = """
+            CASE
+                WHEN %s IS NULL OR %s IS NULL
+                     OR t.mapx IS NULL OR t.mapy IS NULL
+                THEN 999999
+                ELSE
+                    POWER(CAST(t.mapx AS DOUBLE PRECISION) - %s, 2)
+                    +
+                    POWER(CAST(t.mapy AS DOUBLE PRECISION) - %s, 2)
+            END
         """
 
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "system", "content": system_prompt}]
+        cur.execute(
+            f"""
+            SELECT
+                CASE
+                    WHEN l.source = 'actual'
+                    THEN l.area_cd
+                    ELSE l.content_id
+                END AS spot_id,
+                l.area_cd,
+                l.content_id,
+                {name_expr} AS name,
+                {category_expr} AS category,
+                t.image_url,
+                {description_expr} AS description,
+                {address_expr} AS address,
+                t.mapx,
+                t.mapy,
+                l.congestion_level,
+                l.source
+            FROM latest_congestion l
+            JOIN tour_spots t
+                ON l.content_id = t.content_id
+            LEFT JOIN seoul_spots s
+                ON l.area_cd = s.area_cd
+            WHERE
+                (
+                    CASE
+                        WHEN l.source = 'actual'
+                        THEN l.area_cd
+                        ELSE l.content_id
+                    END
+                ) != %s
+                AND l.congestion_level IN ('여유', '보통')
+            ORDER BY
+                CASE
+                    WHEN {category_expr} = %s THEN 0
+                    ELSE 1
+                END,
+                {distance_order},
+                name
+            LIMIT 40
+            """,
+            (
+                spot_id,
+                origin_category,
+                origin_x,
+                origin_y,
+                origin_x,
+                origin_y
+            )
         )
-        
-        ai_reply = response.choices[0].message.content
-        selected_ids = [aid.strip() for aid in ai_reply.split(",") if aid.strip()]
 
-        if selected_ids:
-            cur.execute(f"""
-                SELECT s.area_cd, {name_col}, {cat_col}, t.image_url, {desc_col}, {addr_col}, c.congestion_level
-                FROM seoul_spots s
-                LEFT JOIN spot_mapping m ON s.area_cd = m.area_cd
-                LEFT JOIN tour_spots t ON m.content_id = t.content_id
-                LEFT JOIN congestion_data c ON s.area_cd = c.area_cd
-                WHERE s.area_cd IN %s
-            """, (tuple(selected_ids),))
-            
-            rows = cur.fetchall()
-            return [{"area_cd": r[0], "name": r[1], "category": r[2], "image_url": r[3], "description": r[4], "address": r[5], "congestion_level": r[6]} for r in rows]
+        rows = cur.fetchall()
+
+        if not rows:
+            return {"alternatives": []}
+
+        candidates = []
+
+        for row in rows:
+            candidates.append({
+                "spot_id": row[0],
+                "area_cd": row[1],
+                "content_id": row[2],
+                "name": row[3],
+                "category": row[4],
+                "image_url": row[5],
+                "description": row[6],
+                "address": row[7],
+                "mapx": float(row[8]) if row[8] is not None else None,
+                "mapy": float(row[9]) if row[9] is not None else None,
+                "congestion_level": row[10],
+                "congestion_source": row[11]
+            })
+
+        api_key = os.getenv("OPENAI_API_KEY")
+
+        # OpenAI 키가 없으면 DB 추천 상위 4개
+        if not api_key:
+            return {"alternatives": candidates[:4]}
+
+        candidate_text = "\n".join([
+            (
+                f"ID: {c['spot_id']} | "
+                f"Name: {c['name']} | "
+                f"Category: {c['category']} | "
+                f"Description: {(c['description'] or '')[:120]}"
+            )
+            for c in candidates
+        ])
+
+        origin_desc = origin_description or ""
+
+        if lang == "en":
+            prompt = f"""
+You are a Seoul travel recommendation assistant.
+
+Target:
+Name: {origin_name}
+Category: {origin_category}
+Description: {origin_desc[:200]}
+
+Candidate List:
+{candidate_text}
+
+Choose exactly 4 destinations that are most similar
+in theme, atmosphere, and travel purpose.
+
+Rules:
+1. Use ONLY IDs from Candidate List.
+2. Prefer similar categories and experiences.
+3. Candidates are already filtered to relatively low congestion.
+4. Return ONLY 4 IDs separated by commas.
+"""
         else:
-            return []
+            prompt = f"""
+너는 서울 관광지 대안 추천 도우미다.
+
+기존 관광지:
+이름: {origin_name}
+카테고리: {origin_category}
+설명: {origin_desc[:200]}
+
+후보 목록:
+{candidate_text}
+
+선택 기준:
+1. 후보 목록의 ID만 사용한다.
+2. 기존 관광지와 테마, 분위기, 방문 목적이 비슷한 곳을 우선한다.
+3. 후보는 이미 여유/보통 혼잡도 위주로 필터링되어 있다.
+4. 정확히 4개의 ID만 쉼표로 구분해 출력한다.
+"""
+
+        try:
+            client = OpenAI(api_key=api_key)
+
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": prompt
+                    }
+                ]
+            )
+
+            ai_reply = (
+                response
+                .choices[0]
+                .message
+                .content
+                or ""
+            )
+
+            selected_ids = [
+                value.strip()
+                for value in ai_reply.split(",")
+                if value.strip()
+            ]
+
+        except Exception as ai_error:
+            # AI 호출이 실패해도 대안 관광지 기능 자체는 계속 동작
+            print(f"⚠️ AI 추천 실패, DB 추천으로 대체: {ai_error}")
+            selected_ids = []
+
+        candidate_map = {
+            candidate["spot_id"]: candidate
+            for candidate in candidates
+        }
+
+        alternatives = []
+
+        for selected_id in selected_ids:
+            if selected_id in candidate_map:
+                alternatives.append(candidate_map[selected_id])
+
+            if len(alternatives) == 4:
+                break
+
+        # AI 결과 부족/실패 시 DB 추천으로 보충
+        if len(alternatives) < 4:
+            existing_ids = {
+                item["spot_id"]
+                for item in alternatives
+            }
+
+            for candidate in candidates:
+                if candidate["spot_id"] in existing_ids:
+                    continue
+
+                alternatives.append(candidate)
+
+                if len(alternatives) == 4:
+                    break
+
+        return {"alternatives": alternatives}
 
     except Exception as e:
-        print(f"🚨 AI 대안 관광지 추천 에러: {e}")
-        return []
-        
+        print(f"🚨 대안 관광지 추천 에러: {e}")
+        return {"alternatives": []}
+
     finally:
         cur.close()
         conn.close()
