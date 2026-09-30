@@ -62,9 +62,9 @@ def init_tables():
     
     cur.execute("""
         CREATE TABLE spot_mapping (
-            id SERIAL PRIMARY KEY, 
-            area_cd VARCHAR(50) REFERENCES seoul_spots(area_cd), 
-            content_id VARCHAR(50) REFERENCES tour_spots(content_id)
+            id SERIAL PRIMARY KEY,
+            area_cd VARCHAR(50) UNIQUE REFERENCES seoul_spots(area_cd),
+            content_id VARCHAR(50) UNIQUE REFERENCES tour_spots(content_id)
         );
     """)
     
