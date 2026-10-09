@@ -74,10 +74,19 @@ git fetch origin main
 git reset --hard "$SHA"
 
 # ---------- 3. 파이썬 환경 ----------
-# 가상환경이 없으면(최초 배포) 생성
-[ -d venv ] || python3.12 -m venv venv
+PYTHON=python3.12
 
-# requirements.txt 패키지를 가상환경에 설치 (이미 있는 건 건너뜀)
+# 기존 venv 가 다른 파이썬 버전으로 만들어졌다면 삭제 (최초 배포 시 3.9 로 만들어진 경우 대비)
+if [ -d venv ] && ! ./venv/bin/python --version 2>&1 | grep -q "3.12"; then
+  echo "venv 파이썬 버전이 달라 다시 생성합니다."
+  rm -rf venv
+fi
+
+# 가상환경이 없으면 생성
+[ -d venv ] || "$PYTHON" -m venv venv
+
+# pip 를 먼저 최신으로 올린 뒤 패키지 설치
+./venv/bin/python -m pip install --upgrade pip
 ./venv/bin/pip install -r requirements.txt
 
 # ---------- 4. systemd 서비스 등록 ----------
