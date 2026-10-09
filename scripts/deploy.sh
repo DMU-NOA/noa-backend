@@ -75,7 +75,7 @@ git reset --hard "$SHA"
 
 # ---------- 3. 파이썬 환경 ----------
 # 가상환경이 없으면(최초 배포) 생성
-[ -d venv ] || python3 -m venv venv
+[ -d venv ] || python3.12 -m venv venv
 
 # requirements.txt 패키지를 가상환경에 설치 (이미 있는 건 건너뜀)
 ./venv/bin/pip install -r requirements.txt
