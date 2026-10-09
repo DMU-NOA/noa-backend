@@ -15,6 +15,7 @@ APP_DIR=/home/ec2-user/backend                      # 코드가 설치될 위치
 REPO=https://github.com/DMU-NOA/noa-backend.git     # 퍼블릭 저장소 주소
 ENV_FILE=/home/ec2-user/backend.env                 # API 키, DB 비밀번호 파일 (코드 폴더 밖)
 SERVICE=backend                                     # systemd 서비스 이름
+BALANCE_SERVICE=backend-balance
 SHA="${1:-origin/main}"                             # 첫 번째 인자(커밋 SHA). 없으면 origin/main
 PYTHON=python3.12                                   # venv 에 쓸 파이썬 버전
 
@@ -104,14 +105,43 @@ EOF
   $SUDO systemctl enable "$SERVICE"      # EC2 재부팅 시 자동 시작
 fi
 
-# ---------- 5. 재시작 및 정상 기동 확인 ----------
-$SUDO systemctl restart "$SERVICE"
-sleep 3   # 서버가 완전히 뜰 때까지 잠깐 대기
 
-# 실행 중이 아니면 최근 로그 30줄을 출력하고 실패 처리 (Actions 로그에서 원인 확인 가능)
-$SUDO systemctl is-active --quiet "$SERVICE" || {
-  $SUDO journalctl -u "$SERVICE" -n 30 --no-pager
-  exit 1
-}
+# ---------- 4-1. 밸런스 게임 서비스 등록 ----------
+if [ ! -f "/etc/systemd/system/${BALANCE_SERVICE}.service" ]; then
+  $SUDO tee "/etc/systemd/system/${BALANCE_SERVICE}.service" > /dev/null <<'EOF'
+[Unit]
+Description=NOA Travel Balance Game (FastAPI)
+After=network.target
+
+[Service]
+User=ec2-user
+WorkingDirectory=/home/ec2-user/backend
+EnvironmentFile=/home/ec2-user/backend.env
+ExecStart=/home/ec2-user/backend/venv/bin/python -m uvicorn app.balance.travel_balance_game:app --host 0.0.0.0 --port 8001
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  $SUDO systemctl daemon-reload
+  $SUDO systemctl enable "$BALANCE_SERVICE"
+fi
+
+# ---------- 5. 두 서비스 재시작 및 정상 기동 확인 ----------
+for svc in "$SERVICE" "$BALANCE_SERVICE"; do
+  $SUDO systemctl restart "$svc"
+done
+
+sleep 3
+
+for svc in "$SERVICE" "$BALANCE_SERVICE"; do
+  if ! $SUDO systemctl is-active --quiet "$svc"; then
+    echo "ERROR: $svc 서비스 실행 실패"
+    $SUDO journalctl -u "$svc" -n 30 --no-pager || true
+    exit 1
+  fi
+done
 
 echo "배포 완료: $SHA"
