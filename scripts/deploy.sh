@@ -105,10 +105,8 @@ EOF
   $SUDO systemctl enable "$SERVICE"      # EC2 재부팅 시 자동 시작
 fi
 
-
 # ---------- 4-1. 밸런스 게임 서비스 등록 ----------
-if [ ! -f "/etc/systemd/system/${BALANCE_SERVICE}.service" ]; then
-  $SUDO tee "/etc/systemd/system/${BALANCE_SERVICE}.service" > /dev/null <<'EOF'
+$SUDO tee "/etc/systemd/system/${BALANCE_SERVICE}.service" > /dev/null <<'EOF'
 [Unit]
 Description=NOA Travel Balance Game (FastAPI)
 After=network.target
@@ -117,7 +115,7 @@ After=network.target
 User=ec2-user
 WorkingDirectory=/home/ec2-user/backend
 EnvironmentFile=/home/ec2-user/backend.env
-ExecStart=/home/ec2-user/backend/venv/bin/python -m uvicorn app.balance.travel_balance_game:app --host 0.0.0.0 --port 8001
+ExecStart=/home/ec2-user/backend/venv/bin/python -m uvicorn balance.travel_balance_game:app --host 0.0.0.0 --port 8001
 Restart=always
 RestartSec=3
 
@@ -125,9 +123,8 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
-  $SUDO systemctl daemon-reload
-  $SUDO systemctl enable "$BALANCE_SERVICE"
-fi
+$SUDO systemctl daemon-reload
+$SUDO systemctl enable "$BALANCE_SERVICE"
 
 # ---------- 5. 두 서비스 재시작 및 정상 기동 확인 ----------
 for svc in "$SERVICE" "$BALANCE_SERVICE"; do
