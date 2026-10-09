@@ -16,6 +16,7 @@ REPO=https://github.com/DMU-NOA/noa-backend.git     # 퍼블릭 저장소 주소
 ENV_FILE=/home/ec2-user/backend.env                 # API 키, DB 비밀번호 파일 (코드 폴더 밖)
 SERVICE=backend                                     # systemd 서비스 이름
 SHA="${1:-origin/main}"                             # 첫 번째 인자(커밋 SHA). 없으면 origin/main
+PYTHON=python3.12                                   # venv 에 쓸 파이썬 버전
 
 # root 로 실행되면 sudo 불필요, 일반 사용자면 sudo 사용
 if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
@@ -36,21 +37,11 @@ install_pkg() {
   fi
 }
 
-# git, python3 가 없으면 설치
-command -v git > /dev/null     || install_pkg git
-command -v python3 > /dev/null || install_pkg python3
-
-# python3 -m venv 가 안 되면 추가 설치 (Ubuntu 는 별도 패키지)
-if ! python3 -m venv --help > /dev/null 2>&1; then
-  if command -v apt-get > /dev/null; then
-    install_pkg python3-venv python3-pip
-  else
-    install_pkg python3-pip
-  fi
-fi
+command -v git > /dev/null       || install_pkg git
+command -v "$PYTHON" > /dev/null || install_pkg python3.12 python3.12-pip
 
 # 설치 후에도 없으면 중단
-for cmd in git python3; do
+for cmd in git "$PYTHON"; do
   command -v "$cmd" > /dev/null || { echo "ERROR: $cmd 설치 실패"; exit 1; }
 done
 
@@ -74,8 +65,6 @@ git fetch origin main
 git reset --hard "$SHA"
 
 # ---------- 3. 파이썬 환경 ----------
-PYTHON=python3.12
-
 # 기존 venv 가 다른 파이썬 버전으로 만들어졌다면 삭제 (최초 배포 시 3.9 로 만들어진 경우 대비)
 if [ -d venv ] && ! ./venv/bin/python --version 2>&1 | grep -q "3.12"; then
   echo "venv 파이썬 버전이 달라 다시 생성합니다."
