@@ -6,6 +6,7 @@ import re
 from app.scripts.db import get_db
 from app.api.endpoints.spot_weather import load_weather_from_db, live_weather_from_payload
 from app.api.endpoints.spot_transport import load_nearby_transit, load_recent_road_parking
+from app.api.endpoints.hourly_forecast import get_hourly_forecast
 import os
 import requests
 from openai import OpenAI
@@ -543,48 +544,9 @@ Rules:
 
 @router.get("/spots/{spot_id}/forecast")
 def get_spot_forecast(spot_id: str, lang: str = "ko"):
-    try:
-        SEOUL_API_KEY = os.getenv("SEOUL_API_KEY")
-        if not SEOUL_API_KEY:
-            raise ValueError("SEOUL_API_KEY가 설정되지 않았습니다.")
+    """Serve fresh official CityData or validated area-level ML predictions from DB."""
+    return get_hourly_forecast(spot_id, lang=lang)
 
-        # 💡 다국어 지원: 언어에 따라 국문/영문 API 엔드포인트 분기처리!
-        seoul_api_type = "citydata_eng" if lang == "en" else "citydata"
-        url = f"http://openapi.seoul.go.kr:8088/{SEOUL_API_KEY}/json/{seoul_api_type}/1/5/{spot_id}"
-        
-        res = requests.get(url, timeout=10)
-        data = res.json()
-        
-        citydata = data.get("CITYDATA", {})
-        if not citydata:
-            return {"forecast": []}
-            
-        live_ppltn = citydata.get("LIVE_PPLTN_STTS", [])
-        if not live_ppltn:
-            return {"forecast": []}
-            
-        fcst_data = live_ppltn[0].get("FCST_PPLTN", [])
-        forecast_list = []
-        
-        for fcst in fcst_data:
-            time_str = fcst.get("FCST_TIME", "")
-            hour_label = time_str.split(" ")[1].split(":")[0] + ("시" if lang == "ko" else ":00") if time_str else ""
-            
-            # 영문 API는 Crowded, Normal 등으로 옵니다.
-            lvl = fcst.get("FCST_CONGEST_LVL", "여유")
-            pop = int(fcst.get("FCST_PPLTN_MAX", 0)) 
-                
-            forecast_list.append({
-                "time": hour_label,
-                "population": pop,
-                "level": lvl
-            })
-
-        return {"forecast": forecast_list}
-        
-    except Exception as e:
-        print(f"🚨 시간별 예측 API 에러: {e}")
-        return {"forecast": []}
 
 # Date windows and coordinates for every festival use the tourist's local date.
 FESTIVAL_RADIUS_M = 3000
