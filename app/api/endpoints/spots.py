@@ -4,6 +4,7 @@ from math import asin, cos, radians, sin, sqrt
 from zoneinfo import ZoneInfo
 import re
 from app.scripts.db import get_db
+from app.api.endpoints.spot_weather import load_weather_from_db, live_weather_from_payload
 import os
 import requests
 from openai import OpenAI
@@ -750,7 +751,10 @@ def get_spot_additional_info(spot_id: str, lang: str = "ko"):
     # The old endpoint returned an entirely empty response in that situation.
     today = datetime.now(ZoneInfo("Asia/Seoul")).date()
     area_cd, festivals, coords = _spot_festivals_and_area(spot_id, today=today)
-    empty = {"weather": None, "traffic": None, "parking_lots": [], "events": festivals}
+    # Every tourist spot can use a recent observation from a nearby CityData area.
+    # A true mapped area still prefers a fresh live API response if available.
+    db_weather = load_weather_from_db(spot_id, area_cd)
+    empty = {"weather": db_weather, "traffic": None, "parking_lots": [], "events": festivals}
     if not area_cd:
         return empty
 
@@ -767,35 +771,7 @@ def get_spot_additional_info(spot_id: str, lang: str = "ko"):
         if not isinstance(citydata, dict):
             return empty
 
-        # Preserve the existing weather/air-quality response contract.
-        weather_data = citydata.get("WEATHER_STTS") or []
-        if isinstance(weather_data, dict):
-            weather_data = [weather_data]
-        weather = None
-        if weather_data:
-            w = weather_data[0]
-            raw_forecast = w.get("FCST24HOURS") or []
-            if isinstance(raw_forecast, dict):
-                raw_forecast = [raw_forecast]
-            fcst24 = []
-            for f in raw_forecast:
-                stamp = str(f.get("FCST_DT") or "")
-                hour = stamp[8:10] + ("시" if lang == "ko" else ":00") if len(stamp) >= 10 else "-"
-                fcst24.append({
-                    "time": hour, "temp": f.get("TEMP", "-"),
-                    "sky": f.get("SKY_STTS") or "정보 없음",
-                    "rain_chance": f.get("RAIN_CHANCE", "0"),
-                })
-            weather = {
-                "temp": w.get("TEMP", "-"),
-                "pm10": w.get("PM10_INDEX", "-"),
-                "pm10_val": w.get("PM10", "-"),
-                "pm25": w.get("PM25_INDEX", "-"),
-                "pm25_val": w.get("PM25", "-"),
-                "humidity": w.get("HUMIDITY", "-"),
-                "msg": w.get("PCP_MSG", "") if lang == "en" else w.get("WEATHER_MSG", ""),
-                "forecast24": fcst24,
-            }
+        weather = live_weather_from_payload(citydata, lang=lang) or db_weather
 
         traffic_data = citydata.get("ROAD_TRAFFIC_STTS") or {}
         traffic = {
