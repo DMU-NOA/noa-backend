@@ -2,388 +2,97 @@ from fastapi import APIRouter, HTTPException
 from app.scripts.db import get_db
 import os
 import requests
-from openai import OpenAI # 💡 AI 연결을 위해 추가된 모듈
+from openai import OpenAI
 
 router = APIRouter()
 
+# 관광지를 기본으로 조회한다. 예전 미검증 predicted 값은 표시하지 않는다.
+# DB 자체가 준비되지 않은 경우는 숨기지 않고 서버 오류로 알려준다.
+SPOT_QUERY = """
+SELECT
+  COALESCE(m.area_cd, t.content_id) AS spot_id,
+  m.area_cd, t.content_id,
+  CASE WHEN %s = 'en'
+    THEN COALESCE(NULLIF(s.name_en, ''), NULLIF(t.name_en, ''), s.name, t.name)
+    ELSE COALESCE(s.name, t.name) END AS name,
+  CASE WHEN %s = 'en'
+    THEN COALESCE(s.category_en, s.category, t.category)
+    ELSE COALESCE(s.category, t.category) END AS category,
+  COALESCE(NULLIF(t.image_url, ''), NULLIF(t.image_url2, '')) AS image_url,
+  CASE WHEN %s = 'en'
+    THEN COALESCE(NULLIF(t.description_en, ''), NULLIF(t.description, ''), 'No description available.')
+    ELSE COALESCE(NULLIF(t.description, ''), '상세 소개 정보가 없습니다.') END AS description,
+  CASE WHEN %s = 'en'
+    THEN COALESCE(NULLIF(t.address_en, ''), t.address)
+    ELSE t.address END AS address,
+  t.mapx, t.mapy,
+  COALESCE(a.congestion_level, '데이터 없음') AS congestion_level,
+  a.source AS congestion_source,
+  a.updated_at
+FROM tour_spots t
+LEFT JOIN spot_mapping m ON m.content_id = t.content_id
+LEFT JOIN seoul_spots s ON s.area_cd = m.area_cd
+LEFT JOIN latest_congestion a
+  ON a.content_id = t.content_id AND a.source = 'actual'
+"""
+
+
+def _serialize(row):
+    return {
+        "spot_id": str(row[0]), "area_cd": row[1], "content_id": row[2],
+        "name": row[3], "category": row[4], "image_url": row[5],
+        "description": row[6], "address": row[7],
+        "mapx": float(row[8]) if row[8] is not None else None,
+        "mapy": float(row[9]) if row[9] is not None else None,
+        "congestion_level": row[10], "congestion_source": row[11],
+        "updated_at": row[12].isoformat() if row[12] else None,
+    }
+
+
+def _load_spots(lang="ko", keyword=None, spot_id=None):
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            sql = SPOT_QUERY
+            params = [lang] * 4
+            if keyword is not None:
+                sql += """
+                WHERE (COALESCE(s.name, '') ILIKE %s
+                  OR COALESCE(s.name_en, '') ILIKE %s
+                  OR COALESCE(t.name, '') ILIKE %s
+                  OR COALESCE(t.name_en, '') ILIKE %s
+                  OR COALESCE(t.description, '') ILIKE %s
+                  OR COALESCE(t.category, '') ILIKE %s)
+                """
+                params += [f"%{keyword}%"] * 6
+            elif spot_id is not None:
+                sql += " WHERE m.area_cd = %s OR t.content_id = %s"
+                params += [spot_id, spot_id]
+            sql += " ORDER BY name"
+            cur.execute(sql, params)
+            return [_serialize(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 @router.get("/spots")
 def get_all_spots(lang: str = "ko"):
-    conn = get_db()
-    cur = conn.cursor()
+    rows = _load_spots(lang=lang)
+    return {"count": len(rows), "data": rows}
 
-    try:
-        if lang == "en":
-            name_col = """
-                CASE
-                    WHEN l.source = 'actual'
-                    THEN COALESCE(s.name_en, s.name, t.name_en, t.name)
-                    ELSE COALESCE(t.name_en, t.name)
-                END
-            """
-
-            cat_col = """
-                CASE
-                    WHEN l.source = 'actual'
-                    THEN COALESCE(s.category_en, s.category, t.category)
-                    ELSE t.category
-                END
-            """
-
-            desc_col = "COALESCE(t.description_en, t.description)"
-            addr_col = "COALESCE(t.address_en, t.address)"
-
-        else:
-            name_col = """
-                CASE
-                    WHEN l.source = 'actual'
-                    THEN COALESCE(s.name, t.name)
-                    ELSE t.name
-                END
-            """
-
-            cat_col = """
-                CASE
-                    WHEN l.source = 'actual'
-                    THEN COALESCE(s.category, t.category)
-                    ELSE t.category
-                END
-            """
-
-            desc_col = "t.description"
-            addr_col = "t.address"
-
-        query = f"""
-            SELECT
-                COALESCE(l.area_cd, t.content_id) AS spot_id,
-
-                l.area_cd,
-                t.content_id,
-
-                {name_col} AS name,
-                {cat_col} AS category,
-
-                t.image_url,
-                {desc_col} AS description,
-                {addr_col} AS address,
-
-                t.mapx,
-                t.mapy,
-
-                l.congestion_level,
-                l.source,
-                l.updated_at
-
-            FROM latest_congestion l
-
-            JOIN tour_spots t
-                ON l.content_id = t.content_id
-
-            LEFT JOIN seoul_spots s
-                ON l.area_cd = s.area_cd
-
-            ORDER BY name
-        """
-
-        cur.execute(query)
-        rows = cur.fetchall()
-
-        results = []
-
-        for row in rows:
-            results.append({
-                "spot_id": row[0],
-                "area_cd": row[1],
-                "content_id": row[2],
-
-                "name": row[3],
-                "category": row[4],
-
-                "image_url": row[5],
-                "description": row[6],
-                "address": row[7],
-
-                "mapx": float(row[8]) if row[8] else 0.0,
-                "mapy": float(row[9]) if row[9] else 0.0,
-
-                "congestion_level": row[10] or "데이터 없음",
-                "congestion_source": row[11],
-
-                "updated_at": (
-                    row[12].isoformat()
-                    if row[12]
-                    else None
-                )
-            })
-
-        return {
-            "count": len(results),
-            "data": results
-        }
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
-
-    finally:
-        cur.close()
-        conn.close()
 
 @router.get("/spots/search")
 def search_spots(keyword: str, lang: str = "ko"):
-    conn = get_db()
-    cur = conn.cursor()
+    return {"results": _load_spots(lang=lang, keyword=keyword), "recommendations": []}
 
-    try:
-        search_term = f"%{keyword}%"
 
-        if lang == "en":
-            name_col = """
-                CASE
-                    WHEN l.source = 'actual'
-                    THEN COALESCE(s.name_en, s.name, t.name_en, t.name)
-                    ELSE COALESCE(t.name_en, t.name)
-                END
-            """
-
-            desc_col = "COALESCE(t.description_en, t.description)"
-            addr_col = "COALESCE(t.address_en, t.address)"
-
-        else:
-            name_col = """
-                CASE
-                    WHEN l.source = 'actual'
-                    THEN COALESCE(s.name, t.name)
-                    ELSE t.name
-                END
-            """
-
-            desc_col = "t.description"
-            addr_col = "t.address"
-
-        query = f"""
-            SELECT
-                COALESCE(l.area_cd, t.content_id) AS spot_id,
-                l.area_cd,
-                t.content_id,
-
-                {name_col} AS name,
-                COALESCE(s.category, t.category) AS category,
-
-                t.image_url,
-                {desc_col} AS description,
-                {addr_col} AS address,
-
-                t.mapx,
-                t.mapy,
-
-                l.congestion_level,
-                l.source
-
-            FROM latest_congestion l
-
-            JOIN tour_spots t
-                ON l.content_id = t.content_id
-
-            LEFT JOIN seoul_spots s
-                ON l.area_cd = s.area_cd
-
-            WHERE
-                COALESCE(s.name, '') ILIKE %s
-                OR COALESCE(s.name_en, '') ILIKE %s
-                OR COALESCE(t.name, '') ILIKE %s
-                OR COALESCE(t.name_en, '') ILIKE %s
-                OR COALESCE(t.description, '') ILIKE %s
-                OR COALESCE(t.description_en, '') ILIKE %s
-                OR COALESCE(s.category, '') ILIKE %s
-                OR COALESCE(t.category, '') ILIKE %s
-
-            ORDER BY name
-        """
-
-        cur.execute(
-            query,
-            (
-                search_term,
-                search_term,
-                search_term,
-                search_term,
-                search_term,
-                search_term,
-                search_term,
-                search_term,
-            )
-        )
-
-        rows = cur.fetchall()
-
-        results = []
-
-        for row in rows:
-            results.append({
-                "spot_id": row[0],
-                "area_cd": row[1],
-                "content_id": row[2],
-
-                "name": row[3],
-                "category": row[4],
-
-                "image_url": row[5],
-                "description": row[6],
-                "address": row[7],
-
-                "mapx": float(row[8]) if row[8] else 0.0,
-                "mapy": float(row[9]) if row[9] else 0.0,
-
-                "congestion_level": row[10] or "데이터 없음",
-                "congestion_source": row[11],
-            })
-
-        return {
-            "results": results,
-            "recommendations": []
-        }
-
-    finally:
-        cur.close()
-        conn.close()
-        
 @router.get("/spots/{spot_id}")
 def get_spot_detail(spot_id: str, lang: str = "ko"):
-    conn = get_db()
-    cur = conn.cursor()
+    rows = _load_spots(lang=lang, spot_id=spot_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Spot not found")
+    return rows[0]
 
-    try:
-        if lang == "en":
-            name_col = """
-                CASE
-                    WHEN l.source = 'actual'
-                    THEN COALESCE(s.name_en, s.name, t.name_en, t.name)
-                    ELSE COALESCE(t.name_en, t.name)
-                END
-            """
-
-            cat_col = """
-                CASE
-                    WHEN l.source = 'actual'
-                    THEN COALESCE(s.category_en, s.category, t.category)
-                    ELSE t.category
-                END
-            """
-
-            desc_col = "COALESCE(t.description_en, t.description)"
-            addr_col = "COALESCE(t.address_en, t.address)"
-
-        else:
-            name_col = """
-                CASE
-                    WHEN l.source = 'actual'
-                    THEN COALESCE(s.name, t.name)
-                    ELSE t.name
-                END
-            """
-
-            cat_col = """
-                CASE
-                    WHEN l.source = 'actual'
-                    THEN COALESCE(s.category, t.category)
-                    ELSE t.category
-                END
-            """
-
-            desc_col = "t.description"
-            addr_col = "t.address"
-
-        query = f"""
-            SELECT
-                COALESCE(l.area_cd, t.content_id) AS spot_id,
-
-                l.area_cd,
-                t.content_id,
-
-                {name_col} AS name,
-                {cat_col} AS category,
-
-                t.image_url,
-                {desc_col} AS description,
-                {addr_col} AS address,
-
-                t.mapx,
-                t.mapy,
-
-                l.congestion_level,
-                l.source,
-                l.updated_at
-
-            FROM latest_congestion l
-
-            JOIN tour_spots t
-                ON l.content_id = t.content_id
-
-            LEFT JOIN seoul_spots s
-                ON l.area_cd = s.area_cd
-
-            WHERE
-                (
-                    l.source = 'actual'
-                    AND l.area_cd = %s
-                )
-
-                OR
-
-                (
-                    l.source = 'predicted'
-                    AND t.content_id = %s
-                )
-
-            LIMIT 1
-        """
-
-        cur.execute(
-            query,
-            (
-                spot_id,
-                spot_id
-            )
-        )
-
-        row = cur.fetchone()
-
-        if not row:
-            raise HTTPException(
-                status_code=404,
-                detail="Spot not found"
-            )
-
-        return {
-            "spot_id": row[0],
-            "area_cd": row[1],
-            "content_id": row[2],
-
-            "name": row[3],
-            "category": row[4],
-
-            "image_url": row[5],
-            "description": row[6],
-            "address": row[7],
-
-            "mapx": float(row[8]) if row[8] else 0.0,
-            "mapy": float(row[9]) if row[9] else 0.0,
-
-            "congestion_level": row[10] or "데이터 없음",
-            "congestion_source": row[11],
-
-            "updated_at": (
-                row[12].isoformat()
-                if row[12]
-                else None
-            )
-        }
-
-    finally:
-        cur.close()
-        conn.close()
 
 # 💡 대안 장소 추천 API
 @router.get("/spots/{spot_id}/alternatives")
