@@ -757,7 +757,7 @@ def get_spot_additional_info(spot_id: str, lang: str = "ko"):
     db_weather = load_weather_from_db(spot_id, area_cd, lang=lang)
     nearby_transit = load_nearby_transit(spot_id)
     # Transport values are read from the pipeline's timestamped DB tables only.
-    traffic, parking_lots = load_recent_road_parking(area_cd, coords)
+    traffic, parking_lots = load_recent_road_parking(spot_id, area_cd, coords)
     empty = {
         "weather": db_weather, "traffic": traffic,
         "parking_lots": parking_lots, "events": festivals,

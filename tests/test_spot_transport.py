@@ -35,13 +35,14 @@ class Connection:
 
 def test_road_and_parking_read_pipeline_tables(monkeypatch):
     cursor = Cursor(
-        road=(24.2, "서행", datetime(2026,10,11,14,45,tzinfo=KST)),
+        road=(24.2, "서행", datetime(2026,10,11,14,45,tzinfo=KST),
+              "POI001", 0.0, True, "경복궁·서촌"),
         park=[("주차장 A", 7, 40, 1000, 350.3,
                datetime(2026,10,11,14,45,tzinfo=KST))],
     )
     conn = Connection(cursor)
     monkeypatch.setattr(spot_transport, "get_db", lambda: conn)
-    traffic, parking = spot_transport.load_recent_road_parking("POI001", (127.0,37.5), NOW)
+    traffic, parking = spot_transport.load_recent_road_parking("123", "POI001", (127.0,37.5), NOW)
     assert traffic["speed"] == 24.2
     assert traffic["source"] == "citydata_db"
     assert parking[0]["cur"] == 7
@@ -50,17 +51,37 @@ def test_road_and_parking_read_pipeline_tables(monkeypatch):
     assert "citydata_parking" in cursor.queries[1][0]
     assert "observed_at >= %s" in cursor.queries[0][0]
     assert cursor.queries[1][1][-1] == 2000
+    assert cursor.queries[0][1][:2] == ("123", "123")
+    assert "near.area_cd" in cursor.queries[0][0]
+    assert "ST_DWithin" in cursor.queries[1][0]
+    assert "p.area_cd = %s" not in cursor.queries[1][0]
     assert conn.closed
 
 
-def test_unknown_area_returns_no_current_road_parking():
-    assert spot_transport.load_recent_road_parking(None) == (None, [])
+def test_unmapped_spot_still_queries_nearby_regions_and_parking(monkeypatch):
+    cursor = Cursor(
+        road=(19.5, "원활", datetime(2026,10,11,14,45,tzinfo=KST),
+              "POI014", 240.7, False, "인근 관광 지역"),
+        park=[("다른 지역에서 수집한 주차장", 8, 36, None, 450,
+               datetime(2026,10,11,14,40,tzinfo=KST))],
+    )
+    conn = Connection(cursor)
+    monkeypatch.setattr(spot_transport, "get_db", lambda: conn)
+    road, lots = spot_transport.load_recent_road_parking("12345", None, (127.0,37.5), NOW)
+    assert road["source_area_cd"] == "POI014"
+    assert road["nearby"] is True
+    assert road["distance_m"] == 241
+    assert road["source_area_name"] == "인근 관광 지역"
+    assert lots[0]["cur"] == 8
+    assert cursor.queries[0][1][2:4] == (None, None)
+    assert "n.distance_m <= %s" in cursor.queries[0][0]
+    assert conn.closed
 
 
 def test_no_parking_query_without_tourist_coordinates(monkeypatch):
     conn = Connection(Cursor(road=None))
     monkeypatch.setattr(spot_transport, "get_db", lambda: conn)
-    assert spot_transport.load_recent_road_parking("POI001", None, NOW) == (None, [])
+    assert spot_transport.load_recent_road_parking("123", "POI001", None, NOW) == (None, [])
     assert len(conn.cursor_obj.queries) == 1
 
 
@@ -91,7 +112,7 @@ def test_detail_combines_transport_weather_festivals_without_citydata(monkeypatc
                         lambda spot_id, area_cd, lang="ko": weather)
     monkeypatch.setattr(spots, "load_nearby_transit", lambda spot_id: nearby)
     monkeypatch.setattr(spots, "load_recent_road_parking",
-                        lambda area_cd, coords: (None, []))
+                        lambda spot_id, area_cd, coords: (None, []))
     result = spots.get_spot_additional_info("123")
     assert result["transit"] == nearby
     assert result["events"][0]["name"] == "축제"

@@ -11,7 +11,7 @@ def mock_weather_db(monkeypatch):
     monkeypatch.setattr(spots, "load_nearby_transit",
                         lambda spot_id: {"subway": [], "bus": [], "hour": 15})
     monkeypatch.setattr(spots, "load_recent_road_parking",
-                        lambda area_cd, coords: (None, []))
+                        lambda spot_id, area_cd, coords: (None, []))
 
 
 

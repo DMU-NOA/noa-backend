@@ -22,39 +22,76 @@ def _serialize_time(stamp):
     return stamp.astimezone(KST).isoformat()
 
 
-def load_recent_road_parking(area_cd, coords=None, now=None):
-    """Read timestamped road and parking observations already stored by pipeline.
+ROAD_RADIUS_M = 1000
 
-    Direct mapping only. Never label a nearby-region road speed as the tourist
-    spot's live traffic, and never display expired parking counts as live.
+
+def load_recent_road_parking(spot_id, area_cd=None, coords=None, now=None):
+    """Read stored CityData observations matched by geography, never collect data.
+
+    Road values from a neighboring CityData region are *regional reference
+    readings*, not traffic measured at the tourist spot. Parking is selected
+    solely by its actual coordinate distance (2 km), irrespective of which
+    CityData region happened to include it.
     """
-    if not area_cd:
-        return None, []
     now = now or datetime.now(KST)
     conn = get_db()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT avg_speed, road_msg, observed_at
-                FROM citydata_road_traffic
-                WHERE area_cd = %s
-                  AND observed_at >= %s AND observed_at <= %s
-                  AND avg_speed BETWEEN 0 AND 200
-                ORDER BY observed_at DESC LIMIT 1
+                WITH targets AS (
+                    SELECT content_id FROM tour_spots WHERE content_id = %s
+                    UNION
+                    SELECT content_id FROM spot_mapping WHERE area_cd = %s
+                ), candidates AS (
+                    SELECT %s::text AS area_cd, 0.0::double precision AS distance_m,
+                           TRUE AS direct
+                    WHERE %s::text IS NOT NULL
+                    UNION ALL
+                    SELECT n.target_id, n.distance_m, FALSE
+                    FROM place_nearby n
+                    JOIN targets t ON t.content_id = n.content_id
+                    WHERE n.target_type = 'citydata_area'
+                      AND n.distance_m <= %s
+                ), nearby AS (
+                    SELECT area_cd, MIN(distance_m) AS distance_m,
+                           BOOL_OR(direct) AS direct
+                    FROM candidates
+                    GROUP BY area_cd
+                )
+                SELECT road.avg_speed, road.road_msg, road.observed_at,
+                       near.area_cd, near.distance_m, near.direct, area.area_nm
+                FROM nearby near
+                JOIN citydata_area area ON area.area_cd = near.area_cd
+                JOIN LATERAL (
+                    SELECT r.avg_speed, r.road_msg, r.observed_at
+                    FROM citydata_road_traffic r
+                    WHERE r.area_cd = near.area_cd
+                      AND r.observed_at >= %s AND r.observed_at <= %s
+                      AND r.avg_speed BETWEEN 0 AND 200
+                    ORDER BY r.observed_at DESC LIMIT 1
+                ) road ON TRUE
+                ORDER BY NOT near.direct, near.distance_m, road.observed_at DESC
+                LIMIT 1
                 """,
-                (area_cd, now - LIVE_MAX_AGE, now + timedelta(minutes=5)),
+                (spot_id, spot_id, area_cd, area_cd, ROAD_RADIUS_M,
+                 now - LIVE_MAX_AGE, now + timedelta(minutes=5)),
             )
             observed = cur.fetchone()
             traffic = None
             if observed:
-                speed, message, stamp = observed
+                speed, message, stamp, source_area, distance, direct, source_name = observed
                 traffic = {
                     "speed": float(speed),
                     "msg": message or "",
                     "observed_at": _serialize_time(stamp),
                     "source": "citydata_db",
-                    "source_area_cd": area_cd,
+                    "source_area_cd": source_area,
+                    "source_area_name": source_name,
+                    "nearby": not bool(direct),
+                    # Distance is to the observed CityData region boundary,
+                    # not to the roadway or its particular speed sensors.
+                    "distance_m": round(float(distance)) if not direct else None,
                 }
 
             parking = []
@@ -68,24 +105,24 @@ def load_recent_road_parking(area_cd, coords=None, now=None):
                         SELECT DISTINCT ON (p.parking_key)
                                p.parking_key, p.parking_name,
                                p.available_count, p.capacity, p.base_fee,
-                               ST_Distance(p.location,
+                               ST_Distance(
+                                   p.location,
                                    ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography
                                ) AS distance_m,
                                p.observed_at
                         FROM citydata_parking p
-                        WHERE p.area_cd = %s
-                          AND p.observed_at >= %s AND p.observed_at <= %s
+                        WHERE p.observed_at >= %s AND p.observed_at <= %s
                           AND ST_DWithin(
                               p.location,
                               ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography,
                               %s
                           )
-                        ORDER BY p.parking_key, p.observed_at DESC
+                        ORDER BY p.parking_key, p.observed_at DESC, p.collected_at DESC
                     ) latest
-                    ORDER BY distance_m, parking_name LIMIT 10
+                    ORDER BY distance_m, parking_name
+                    LIMIT 10
                     """,
-                    (lon, lat, area_cd,
-                     now - LIVE_MAX_AGE, now + timedelta(minutes=5),
+                    (lon, lat, now - LIVE_MAX_AGE, now + timedelta(minutes=5),
                      lon, lat, PARKING_RADIUS_M),
                 )
                 parking = [
