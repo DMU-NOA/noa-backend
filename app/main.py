@@ -86,6 +86,7 @@ async def congestion_update_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    yield
 
     # 백엔드 시작과 동시에 자동 갱신 task 실행
     congestion_task = asyncio.create_task(
