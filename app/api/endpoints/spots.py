@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 import re
 from app.scripts.db import get_db
 from app.api.endpoints.spot_weather import load_weather_from_db, live_weather_from_payload
+from app.api.endpoints.spot_transport import load_nearby_transit, live_transport_from_citydata
 import os
 import requests
 from openai import OpenAI
@@ -754,7 +755,12 @@ def get_spot_additional_info(spot_id: str, lang: str = "ko"):
     # Every tourist spot can use a recent observation from a nearby CityData area.
     # A true mapped area still prefers a fresh live API response if available.
     db_weather = load_weather_from_db(spot_id, area_cd, lang=lang)
-    empty = {"weather": db_weather, "traffic": None, "parking_lots": [], "events": festivals}
+    nearby_transit = load_nearby_transit(spot_id)
+    empty = {
+        "weather": db_weather, "traffic": None,
+        "parking_lots": [], "events": festivals,
+        "transit": nearby_transit,
+    }
     if not area_cd:
         return empty
 
@@ -773,26 +779,7 @@ def get_spot_additional_info(spot_id: str, lang: str = "ko"):
 
         weather = live_weather_from_payload(citydata, lang=lang) or db_weather
 
-        traffic_data = citydata.get("ROAD_TRAFFIC_STTS") or {}
-        traffic = {
-            "msg": "No traffic info." if lang == "en" else "주변 도로 소통 정보가 없습니다.",
-            "speed": "-",
-        }
-        if isinstance(traffic_data, dict) and isinstance(traffic_data.get("AVG_ROAD_DATA"), dict):
-            road = traffic_data["AVG_ROAD_DATA"]
-            traffic["msg"] = road.get("ROAD_MSG", traffic["msg"])
-            traffic["speed"] = road.get("ROAD_TRAFFIC_SPD", "-")
-
-        parking_data = citydata.get("PRK_STTS") or []
-        if isinstance(parking_data, dict):
-            parking_data = [parking_data]
-        parking_lots = [
-            {
-                "name": p["PRK_NM"], "cur": p.get("CUR_PRK_CNT", 0),
-                "max": p.get("CPCTY", 0), "fee": p.get("RATES", 0),
-            }
-            for p in parking_data if isinstance(p, dict) and p.get("PRK_NM")
-        ]
+        traffic, parking_lots = live_transport_from_citydata(citydata, coords=coords)
 
         seoul_events = citydata.get("CULTURALEVENTINFO") or []
         if isinstance(seoul_events, dict):
@@ -810,6 +797,7 @@ def get_spot_additional_info(spot_id: str, lang: str = "ko"):
         return {
             "weather": weather, "traffic": traffic,
             "parking_lots": parking_lots, "events": events,
+            "transit": nearby_transit,
         }
     except Exception as exc:
         print(f"부가정보 CityData 조회 실패 ({area_cd}): {exc}")

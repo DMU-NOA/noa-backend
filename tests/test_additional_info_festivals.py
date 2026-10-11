@@ -8,6 +8,8 @@ def mock_weather_db(monkeypatch):
     # Existing festival tests must not access a real CityData weather DB.
     monkeypatch.setattr(spots, "load_weather_from_db",
                         lambda spot_id, area_cd, lang="ko": None)
+    monkeypatch.setattr(spots, "load_nearby_transit",
+                        lambda spot_id: {"subway": [], "bus": [], "hour": 15})
 
 
 
