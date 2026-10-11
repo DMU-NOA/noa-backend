@@ -69,7 +69,15 @@ def _load_spots(lang="ko", keyword=None, spot_id=None):
                 sql += " WHERE m.area_cd = %s OR t.content_id = %s"
                 params += [spot_id, spot_id]
             sql += " ORDER BY name"
-            cur.execute(sql, params)
+            try:
+                cur.execute(sql, params)
+            except Exception as exc:
+                # 아직 migration 하지 않은 완전 빈 DB에서도 프론트 목록은 [].
+                # 연결 오류/권한 오류 등 다른 문제는 숨기지 않는다.
+                if getattr(exc, "pgcode", None) == "42P01":
+                    conn.rollback()
+                    return []
+                raise
             return [_serialize(row) for row in cur.fetchall()]
     finally:
         conn.close()
