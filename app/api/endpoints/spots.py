@@ -109,6 +109,38 @@ def _load_spots(lang="ko", keyword=None, spot_id=None):
         conn.close()
 
 
+@router.get("/observed-areas")
+def get_observed_areas(lang: str = "ko"):
+    """TourAPI 매핑 및 사진/상세 소개가 없어도 모든 실측 지역을 제공."""
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.area_cd,
+                       CASE WHEN %s = 'en'
+                         THEN COALESCE(NULLIF(s.name_en, ''), s.name)
+                         ELSE s.name END,
+                       s.category, a.congestion_level, a.updated_at,
+                       a.content_id
+                FROM latest_congestion a
+                JOIN seoul_spots s ON s.area_cd = a.area_cd
+                WHERE a.source = 'actual'
+                ORDER BY s.name
+                """, (lang,)
+            )
+            data = [
+                {"area_cd": code, "name": name, "category": category,
+                 "congestion_level": level, "congestion_source": "actual",
+                 "updated_at": updated.isoformat() if updated else None,
+                 "content_id": content}
+                for code, name, category, level, updated, content in cur.fetchall()
+            ]
+            return {"count": len(data), "data": data}
+    finally:
+        conn.close()
+
+
 @router.get("/spots")
 def get_all_spots(lang: str = "ko"):
     rows = _load_spots(lang=lang)
