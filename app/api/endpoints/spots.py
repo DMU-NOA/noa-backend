@@ -28,7 +28,10 @@ SELECT
   t.mapx, t.mapy,
   COALESCE(a.congestion_level, pr.congestion_level, '데이터 없음') AS congestion_level,
   COALESCE(a.source, pr.source) AS congestion_source,
-  COALESCE(a.updated_at, pr.updated_at) AS updated_at
+  COALESCE(a.updated_at, pr.updated_at) AS updated_at,
+  COALESCE(pr.prediction_verified, false) AS prediction_verified,
+  pr.prediction_method,
+  pr.reference_distance_m
 FROM tour_spots t
 LEFT JOIN spot_mapping m ON m.content_id = t.content_id
 LEFT JOIN seoul_spots s ON s.area_cd = m.area_cd
@@ -49,6 +52,9 @@ def _serialize(row):
         "mapy": float(row[9]) if row[9] is not None else None,
         "congestion_level": row[10], "congestion_source": row[11],
         "updated_at": row[12].isoformat() if row[12] else None,
+        "prediction_verified": bool(row[13]) if row[11] == "predicted" else None,
+        "prediction_method": row[14] if row[11] == "predicted" else None,
+        "reference_distance_m": row[15] if row[11] == "predicted" else None,
     }
 
 
