@@ -18,7 +18,11 @@ SELECT
   CASE WHEN %s = 'en'
     THEN COALESCE(s.category_en, s.category, t.category)
     ELSE COALESCE(s.category, t.category) END AS category,
-  COALESCE(NULLIF(t.image_url, ''), NULLIF(t.image_url2, '')) AS image_url,
+  REPLACE(
+    COALESCE(NULLIF(TRIM(t.image_url), ''), NULLIF(TRIM(t.image_url2), '')),
+    'http://tong.visitkorea.or.kr/',
+    'https://tong.visitkorea.or.kr/'
+  ) AS image_url,
   CASE WHEN %s = 'en'
     THEN COALESCE(NULLIF(t.description_en, ''), NULLIF(t.description, ''), 'No description available.')
     ELSE COALESCE(NULLIF(t.description, ''), '상세 소개 정보가 없습니다.') END AS description,
@@ -64,18 +68,31 @@ def _load_spots(lang="ko", keyword=None, spot_id=None):
         with conn.cursor() as cur:
             sql = SPOT_QUERY
             params = [lang] * 4
-            if keyword is not None:
+            if spot_id is None:
+                # 화면 카드에는 사진과 실질적인 소개가 모두 있는 관광지만 노출한다.
+                # 관광지 원본 레코드는 삭제하지 않아 이후 상세 수집으로 복구 가능하다.
                 sql += """
-                WHERE (COALESCE(s.name, '') ILIKE %s
-                  OR COALESCE(s.name_en, '') ILIKE %s
-                  OR COALESCE(t.name, '') ILIKE %s
-                  OR COALESCE(t.name_en, '') ILIKE %s
-                  OR COALESCE(t.description, '') ILIKE %s
-                  OR COALESCE(t.category, '') ILIKE %s)
+                WHERE COALESCE(
+                  NULLIF(TRIM(t.image_url), ''),
+                  NULLIF(TRIM(t.image_url2), '')
+                ) IS NOT NULL
+                AND NULLIF(TRIM(t.description), '') IS NOT NULL
+                AND TRIM(t.description) NOT IN (
+                  '상세 소개 정보가 없습니다.', 'No description available.'
+                )
                 """
-                params += [f"%{keyword}%"] * 6
-            elif spot_id is not None:
-                sql += " WHERE m.area_cd = %s OR t.content_id = %s"
+                if keyword is not None:
+                    sql += """
+                    AND (COALESCE(s.name, '') ILIKE %s
+                      OR COALESCE(s.name_en, '') ILIKE %s
+                      OR COALESCE(t.name, '') ILIKE %s
+                      OR COALESCE(t.name_en, '') ILIKE %s
+                      OR COALESCE(t.description, '') ILIKE %s
+                      OR COALESCE(t.category, '') ILIKE %s)
+                    """
+                    params += [f"%{keyword}%"] * 6
+            else:
+                sql += " WHERE (m.area_cd = %s OR t.content_id = %s)"
                 params += [spot_id, spot_id]
             sql += " ORDER BY name"
             try:
