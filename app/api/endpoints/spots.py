@@ -105,6 +105,65 @@ def get_spot_detail(spot_id: str, lang: str = "ko"):
     return rows[0]
 
 
+@router.get("/spots/{spot_id}/signals")
+def get_spot_signals(spot_id: str):
+    """수집된 주변 관측 신호의 최신 상태. 직접 혼잡도/ML 결과가 아니다."""
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT content_id FROM tour_spots WHERE content_id = %s
+                   UNION SELECT content_id FROM spot_mapping WHERE area_cd = %s
+                   LIMIT 1""", (spot_id, spot_id)
+            )
+            found = cur.fetchone()
+            if not found:
+                raise HTTPException(status_code=404, detail="Spot not found")
+            cid = found[0]
+            cur.execute(
+                """SELECT target_type, COUNT(*), MIN(distance_m)
+                   FROM place_nearby WHERE content_id = %s
+                   GROUP BY target_type ORDER BY target_type""", (cid,)
+            )
+            nearby = [
+                {"type": a, "count": n, "nearest_m": round(float(d), 1)}
+                for a, n, d in cur.fetchall()
+            ]
+            cur.execute(
+                """SELECT o.visitor_count, o.observed_at, n.distance_m
+                   FROM place_nearby n
+                   JOIN LATERAL (
+                     SELECT visitor_count, observed_at FROM sdot_observation
+                     WHERE sensor_code::text = n.target_id
+                     ORDER BY observed_at DESC LIMIT 1
+                   ) o ON TRUE
+                   WHERE n.content_id = %s AND n.target_type = 'sdot_sensor'
+                   ORDER BY n.distance_m LIMIT 5""", (cid,)
+            )
+            sensors = [
+                {"visitor_count": v, "observed_at": t.isoformat(),
+                 "distance_m": round(float(d), 1)}
+                for v, t, d in cur.fetchall()
+            ]
+            cur.execute(
+                """SELECT h.hub_rank, h.base_ym, h.hub_tats_nm
+                   FROM kto_place_match m
+                   JOIN kto_hub_place h ON h.hub_tats_cd = m.tats_cd
+                   WHERE m.content_id = %s
+                   ORDER BY h.base_ym DESC, h.hub_rank LIMIT 1""", (cid,)
+            )
+            row = cur.fetchone()
+            popularity = (
+                {"rank": row[0], "month": row[1].isoformat(), "name": row[2]}
+                if row else None
+            )
+            return {"content_id": cid, "nearby": nearby,
+                    "sdot_observations": sensors, "kto_hub": popularity,
+                    "notice": "관측 참고정보이며 장소의 실제 혼잡도나 ML 예측이 아닙니다."}
+    finally:
+        conn.close()
+
+
 # 💡 대안 장소 추천 API
 @router.get("/spots/{spot_id}/alternatives")
 def get_alternatives(spot_id: str, lang: str = "ko"):
