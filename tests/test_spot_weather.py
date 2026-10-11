@@ -97,6 +97,8 @@ def test_additional_info_for_unmapped_spot_uses_weather_without_citydata_api(mon
                         lambda spot_id, area_cd, lang="ko": expected)
     monkeypatch.setattr(spots, "load_nearby_transit",
                         lambda spot_id: {"subway": [], "bus": [], "hour": 14})
+    monkeypatch.setattr(spots, "load_recent_road_parking",
+                        lambda area_cd, coords: (None, []))
     def forbidden(*a, **k): raise AssertionError("should not call the Seoul API")
     monkeypatch.setattr(spots.requests, "get", forbidden)
     result = spots.get_spot_additional_info("12345")

@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 import re
 from app.scripts.db import get_db
 from app.api.endpoints.spot_weather import load_weather_from_db, live_weather_from_payload
-from app.api.endpoints.spot_transport import load_nearby_transit, live_transport_from_citydata
+from app.api.endpoints.spot_transport import load_nearby_transit, load_recent_road_parking
 import os
 import requests
 from openai import OpenAI
@@ -756,9 +756,11 @@ def get_spot_additional_info(spot_id: str, lang: str = "ko"):
     # A true mapped area still prefers a fresh live API response if available.
     db_weather = load_weather_from_db(spot_id, area_cd, lang=lang)
     nearby_transit = load_nearby_transit(spot_id)
+    # Transport values are read from the pipeline's timestamped DB tables only.
+    traffic, parking_lots = load_recent_road_parking(area_cd, coords)
     empty = {
-        "weather": db_weather, "traffic": None,
-        "parking_lots": [], "events": festivals,
+        "weather": db_weather, "traffic": traffic,
+        "parking_lots": parking_lots, "events": festivals,
         "transit": nearby_transit,
     }
     if not area_cd:
@@ -778,8 +780,6 @@ def get_spot_additional_info(spot_id: str, lang: str = "ko"):
             return empty
 
         weather = live_weather_from_payload(citydata, lang=lang) or db_weather
-
-        traffic, parking_lots = live_transport_from_citydata(citydata, coords=coords)
 
         seoul_events = citydata.get("CULTURALEVENTINFO") or []
         if isinstance(seoul_events, dict):

@@ -1,7 +1,5 @@
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
-
-import pytest
 
 from app.api.endpoints import spot_transport, spots
 
@@ -9,126 +7,93 @@ KST = ZoneInfo("Asia/Seoul")
 NOW = datetime(2026, 10, 11, 15, 0, tzinfo=KST)
 
 
-def test_live_road_requires_recent_timestamp():
-    payload = {"AREA_CD": "POI001", "ROAD_TRAFFIC_STTS": {
-        "ROAD_TRAFFIC_TIME": "2026-10-11 14:40",
-        "AVG_ROAD_DATA": {"ROAD_TRAFFIC_SPD": "22.3", "ROAD_MSG": "서행"}
-    }}
-    road, parking = spot_transport.live_transport_from_citydata(payload, now=NOW)
-    assert road["speed"] == 22.3
-    assert road["observed_at"] == "2026-10-11T14:40:00+09:00"
-    assert parking == []
-    payload["ROAD_TRAFFIC_STTS"]["ROAD_TRAFFIC_TIME"] = "2026-10-11 08:00"
-    road, _ = spot_transport.live_transport_from_citydata(payload, now=NOW)
-    assert road is None
-    payload["ROAD_TRAFFIC_STTS"].pop("ROAD_TRAFFIC_TIME")
-    road, _ = spot_transport.live_transport_from_citydata(payload, now=NOW)
-    assert road is None
-
-
-def test_only_nearby_fresh_live_parking_is_published():
-    payload = {"PRK_STTS": [
-        {"PRK_NM": "가까운 주차장", "LNG": "127.001", "LAT": "37.501",
-         "CUR_PRK_YN": "Y", "CUR_PRK_TIME": "2026-10-11 14:40",
-         "CUR_PRK_CNT": "3", "CPCTY": "50", "RATES": "1000"},
-        {"PRK_NM": "이미 종료된 관측", "LNG": "127.001", "LAT": "37.501",
-         "CUR_PRK_YN": "Y", "CUR_PRK_TIME": "2026-10-11 12:00",
-         "CUR_PRK_CNT": "6", "CPCTY": "50"},
-        {"PRK_NM": "너무 먼 곳", "LNG": "127.1", "LAT": "37.5",
-         "CUR_PRK_YN": "Y", "CUR_PRK_TIME": "2026-10-11 14:40",
-         "CUR_PRK_CNT": "6", "CPCTY": "50"},
-        {"PRK_NM": "실시간 미제공", "LNG": "127.001", "LAT": "37.501",
-         "CUR_PRK_YN": "N", "CUR_PRK_TIME": "2026-10-11 14:40",
-         "CUR_PRK_CNT": "6", "CPCTY": "50"}
-    ]}
-    _, lots = spot_transport.live_transport_from_citydata(payload, coords=(127, 37.5), now=NOW)
-    assert [p["name"] for p in lots] == ["가까운 주차장"]
-    assert lots[0]["cur"] == 3
-    assert lots[0]["max"] == 50
-    assert lots[0]["distance_m"] < 2000
-    _, lots = spot_transport.live_transport_from_citydata(payload, coords=None, now=NOW)
-    assert lots == []
-
-
-class FakeCursor:
-    def __init__(self):
-        self.calls = []
+class Cursor:
+    def __init__(self, road=None, park=(), subway=(), bus=()):
+        self.road = road
+        self.park = list(park)
+        self.subway = list(subway)
+        self.bus = list(bus)
+        self.queries = []
     def __enter__(self): return self
     def __exit__(self, *args): return False
-    def execute(self, sql, params): self.calls.append((sql,params))
+    def execute(self, sql, params): self.queries.append((sql,params))
+    def fetchone(self): return self.road
     def fetchall(self):
-        if len(self.calls) == 1:
-            return [("경복궁역", 270, date(2026, 8, 1), 15000.0, 13000.0),
-                    ("안국역", 670, None, None, None)]
-        return [("경복궁 버스정류장", 120, date(2026, 8, 1), 1200.0, 900.0)]
+        # Nearby transit uses 2 queries, road/parking uses 1-2 queries.
+        if len(self.queries) == 1:
+            return self.subway
+        return self.park if "citydata_parking" in self.queries[-1][0] else self.bus
 
 
-class FakeConnection:
-    def __init__(self):
-        self.cur = FakeCursor()
+class Connection:
+    def __init__(self, cursor):
+        self.cursor_obj = cursor
         self.closed = False
-    def cursor(self): return self.cur
+    def cursor(self): return self.cursor_obj
     def close(self): self.closed = True
 
 
-def test_transit_is_geolocated_monthly_aggregate_not_realtime(monkeypatch):
-    con = FakeConnection()
-    monkeypatch.setattr(spot_transport, "get_db", lambda: con)
-    value = spot_transport.load_nearby_transit("123", now=NOW)
-    assert [x["name"] for x in value["subway"]] == ["경복궁역", "안국역"]
-    assert value["subway"][0]["distance_m"] == 270
-    assert value["subway"][0]["ridership"] == {
-        "month": "2026-08", "hour": 15, "board_monthly": 15000,
-        "alight_monthly": 13000, "kind": "monthly_hour_total",
-    }
-    assert value["subway"][1]["ridership"] is None
-    assert value["bus"][0]["ridership"]["month"] == "2026-08"
-    assert "station_key" in con.cur.calls[0][0]
-    assert "n.distance_m <= 1000" in con.cur.calls[0][0]
-    assert "n.distance_m <= 500" in con.cur.calls[1][0]
-    assert con.cur.calls[0][1] == ("123", "123", 15)
-    assert con.closed
+def test_road_and_parking_read_pipeline_tables(monkeypatch):
+    cursor = Cursor(
+        road=(24.2, "서행", datetime(2026,10,11,14,45,tzinfo=KST)),
+        park=[("주차장 A", 7, 40, 1000, 350.3,
+               datetime(2026,10,11,14,45,tzinfo=KST))],
+    )
+    conn = Connection(cursor)
+    monkeypatch.setattr(spot_transport, "get_db", lambda: conn)
+    traffic, parking = spot_transport.load_recent_road_parking("POI001", (127.0,37.5), NOW)
+    assert traffic["speed"] == 24.2
+    assert traffic["source"] == "citydata_db"
+    assert parking[0]["cur"] == 7
+    assert parking[0]["distance_m"] == 350
+    assert "citydata_road_traffic" in cursor.queries[0][0]
+    assert "citydata_parking" in cursor.queries[1][0]
+    assert "observed_at >= %s" in cursor.queries[0][0]
+    assert cursor.queries[1][1][-1] == 2000
+    assert conn.closed
 
 
-def test_detail_additional_info_keeps_festivals_and_weather_when_no_live_traffic(monkeypatch):
-    expected_weather = {"temp": 22, "source": "citydata_db"}
+def test_unknown_area_returns_no_current_road_parking():
+    assert spot_transport.load_recent_road_parking(None) == (None, [])
+
+
+def test_no_parking_query_without_tourist_coordinates(monkeypatch):
+    conn = Connection(Cursor(road=None))
+    monkeypatch.setattr(spot_transport, "get_db", lambda: conn)
+    assert spot_transport.load_recent_road_parking("POI001", None, NOW) == (None, [])
+    assert len(conn.cursor_obj.queries) == 1
+
+
+def test_transit_is_monthly_aggregate_not_live(monkeypatch):
+    cursor = Cursor(subway=[
+        ("경복궁역", 270, date(2026,8,1), 15000.0, 13000.0),
+        ("안국역", 670, None, None, None),
+    ], bus=[("경복궁 정류장", 120, date(2026,8,1), 1200.0, 900.0)])
+    conn = Connection(cursor)
+    monkeypatch.setattr(spot_transport, "get_db", lambda: conn)
+    result = spot_transport.load_nearby_transit("123", NOW)
+    assert result["subway"][0]["ridership"]["month"] == "2026-08"
+    assert result["subway"][0]["ridership"]["board_monthly"] == 15000
+    assert result["subway"][1]["ridership"] is None
+    assert result["bus"][0]["ridership"]["kind"] == "monthly_hour_total"
+    assert "station_key" in cursor.queries[0][0]
+    assert "n.distance_m <= 1000" in cursor.queries[0][0]
+    assert "n.distance_m <= 500" in cursor.queries[1][0]
+    assert conn.closed
+
+
+def test_detail_combines_transport_weather_festivals_without_citydata(monkeypatch):
+    weather = {"temp": 22, "source": "citydata_db"}
     nearby = {"subway": [{"name": "A"}], "bus": [], "hour": 15}
     monkeypatch.setattr(spots, "_spot_festivals_and_area",
                         lambda spot_id, today=None: (None, [{"name":"축제"}], (127,37.5)))
     monkeypatch.setattr(spots, "load_weather_from_db",
-                        lambda spot_id, area_cd, lang="ko": expected_weather)
+                        lambda spot_id, area_cd, lang="ko": weather)
     monkeypatch.setattr(spots, "load_nearby_transit", lambda spot_id: nearby)
+    monkeypatch.setattr(spots, "load_recent_road_parking",
+                        lambda area_cd, coords: (None, []))
     result = spots.get_spot_additional_info("123")
     assert result["transit"] == nearby
     assert result["events"][0]["name"] == "축제"
-    assert result["weather"] == expected_weather
+    assert result["weather"] == weather
     assert result["traffic"] is None
-
-
-def test_mapped_spot_combines_live_road_parking_and_transit(monkeypatch):
-    monkeypatch.setattr(spots, "_spot_festivals_and_area",
-                        lambda spot_id, today=None: ("POI001", [], (127.0, 37.5)))
-    monkeypatch.setattr(spots, "load_weather_from_db",
-                        lambda spot_id, area_cd, lang="ko": None)
-    near = {"subway": [], "bus": [{"name": "정류장"}], "hour": 15}
-    monkeypatch.setattr(spots, "load_nearby_transit", lambda spot_id: near)
-    monkeypatch.setattr(spots, "live_weather_from_payload",
-                        lambda payload, lang="ko": None)
-    monkeypatch.setattr(spots, "live_transport_from_citydata",
-                        lambda payload, coords: (
-                            {"speed": 30.0, "observed_at": NOW.isoformat()},
-                            [{"name": "주차장", "cur": 7, "max": 30}],
-                        ))
-    monkeypatch.setenv("SEOUL_API_KEY", "fake-key")
-
-    class Response:
-        def raise_for_status(self): pass
-        def json(self):
-            return {"CITYDATA": {"AREA_CD": "POI001"}}
-
-    monkeypatch.setattr(spots.requests, "get", lambda *a, **k: Response())
-    data = spots.get_spot_additional_info("POI001")
-    assert data["traffic"]["speed"] == 30
-    assert data["parking_lots"][0]["cur"] == 7
-    assert data["transit"] == near
-    assert data["events"] == []

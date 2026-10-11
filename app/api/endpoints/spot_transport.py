@@ -1,11 +1,10 @@
-"""Nearby transit statistics and fresh road/parking data for spot details.
+"""Read already-processed transport tables from the NOA shared PostgreSQL DB.
 
-Station/stop ridership is monthly aggregated historical data, NEVER live traffic.
-Road/parking come only from directly mapped CityData locations and only
-when the API supplies credible, recent observation timestamps.
+Collection, validation, and historical snapshot ingestion belong exclusively
+to the data-pipelines project. This module only filters/serializes DB records.
+Monthly subway/bus counts remain historical statistics, not live data.
 """
 from datetime import datetime, timedelta
-from math import asin, cos, radians, sin, sqrt
 from zoneinfo import ZoneInfo
 
 from app.scripts.db import get_db
@@ -15,115 +14,95 @@ LIVE_MAX_AGE = timedelta(minutes=90)
 PARKING_RADIUS_M = 2000
 
 
-def _recent_time(value, now):
-    if not value:
+def _serialize_time(stamp):
+    if stamp is None:
         return None
-    try:
-        if isinstance(value, datetime):
-            stamp = value
-        else:
-            stamp = datetime.fromisoformat(str(value).strip())
-        if stamp.tzinfo is None:
-            stamp = stamp.replace(tzinfo=KST)
-        stamp = stamp.astimezone(KST)
-        if -timedelta(minutes=5) <= now - stamp <= LIVE_MAX_AGE:
-            return stamp
-    except (ValueError, TypeError):
-        return None
-    return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=KST)
+    return stamp.astimezone(KST).isoformat()
 
 
-def _number(value):
-    try:
-        if value is None or str(value).strip() in ("", "-"):
-            return None
-        return float(value)
-    except (ValueError, TypeError):
-        return None
+def load_recent_road_parking(area_cd, coords=None, now=None):
+    """Read timestamped road and parking observations already stored by pipeline.
 
-
-def _nonnegative_int(value):
-    v = _number(value)
-    if v is None or v < 0 or not v.is_integer():
-        return None
-    return int(v)
-
-
-def _straight_distance_m(from_coords, to_coords):
-    lon1, lat1 = map(float, from_coords)
-    lon2, lat2 = map(float, to_coords)
-    if not (-180 <= lon1 <= 180 and -180 <= lon2 <= 180
-            and -90 <= lat1 <= 90 and -90 <= lat2 <= 90):
-        raise ValueError("invalid coordinates")
-    dlon, dlat = radians(lon2-lon1), radians(lat2-lat1)
-    a = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
-    return 2 * 6371000 * asin(min(1, sqrt(a)))
-
-
-def live_transport_from_citydata(citydata, coords=None, now=None):
-    """Parse CityData road + parking only when each reading is current.
-
-    Returns an independent (traffic, parking_lots) tuple, so one missing
-    dataset does not prevent the other from being shown.
+    Direct mapping only. Never label a nearby-region road speed as the tourist
+    spot's live traffic, and never display expired parking counts as live.
     """
+    if not area_cd:
+        return None, []
     now = now or datetime.now(KST)
-    road = citydata.get("ROAD_TRAFFIC_STTS") or {}
-    if isinstance(road, list):
-        road = road[0] if road and isinstance(road[0], dict) else {}
-    traffic = None
-    if isinstance(road, dict):
-        avg = road.get("AVG_ROAD_DATA") or {}
-        if isinstance(avg, list):
-            avg = avg[0] if avg and isinstance(avg[0], dict) else {}
-        if isinstance(avg, dict):
-            stamp = _recent_time(
-                road.get("ROAD_TRAFFIC_TIME") or avg.get("ROAD_TRAFFIC_TIME"), now
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT avg_speed, road_msg, observed_at
+                FROM citydata_road_traffic
+                WHERE area_cd = %s
+                  AND observed_at >= %s AND observed_at <= %s
+                  AND avg_speed BETWEEN 0 AND 200
+                ORDER BY observed_at DESC LIMIT 1
+                """,
+                (area_cd, now - LIVE_MAX_AGE, now + timedelta(minutes=5)),
             )
-            speed = _number(avg.get("ROAD_TRAFFIC_SPD", road.get("ROAD_TRAFFIC_SPD")))
-            if stamp and speed is not None and 0 <= speed <= 200:
+            observed = cur.fetchone()
+            traffic = None
+            if observed:
+                speed, message, stamp = observed
                 traffic = {
-                    "speed": speed,
-                    "msg": avg.get("ROAD_MSG") or road.get("ROAD_MSG") or "",
-                    "observed_at": stamp.isoformat(),
-                    "source": "seoul_citydata",
-                    "source_area_cd": citydata.get("AREA_CD"),
+                    "speed": float(speed),
+                    "msg": message or "",
+                    "observed_at": _serialize_time(stamp),
+                    "source": "citydata_db",
+                    "source_area_cd": area_cd,
                 }
 
-    parking = citydata.get("PRK_STTS") or []
-    if isinstance(parking, dict):
-        parking = [parking]
-    result = []
-    if coords is None:
-        return traffic, result
-    for item in parking if isinstance(parking, list) else []:
-        if not isinstance(item, dict) or not item.get("PRK_NM"):
-            continue
-        if str(item.get("CUR_PRK_YN") or "").upper() != "Y":
-            continue
-        stamp = _recent_time(item.get("CUR_PRK_TIME"), now)
-        available = _nonnegative_int(item.get("CUR_PRK_CNT"))
-        capacity = _nonnegative_int(item.get("CPCTY"))
-        if stamp is None or available is None or capacity is None or available > capacity:
-            continue
-        try:
-            distance = _straight_distance_m(
-                coords, (item["LNG"], item["LAT"])
-            )
-        except (KeyError, ValueError, TypeError):
-            continue
-        if distance > PARKING_RADIUS_M:
-            continue
-        result.append({
-            "name": str(item["PRK_NM"]),
-            "cur": available,
-            "max": capacity,
-            "fee": _nonnegative_int(item.get("RATES")),
-            "distance_m": round(distance),
-            "observed_at": stamp.isoformat(),
-            "source": "seoul_citydata",
-        })
-    result.sort(key=lambda p: (p["distance_m"], p["name"]))
-    return traffic, result[:10]
+            parking = []
+            if coords is not None:
+                lon, lat = coords
+                cur.execute(
+                    """
+                    SELECT parking_name, available_count, capacity,
+                           base_fee, distance_m, observed_at
+                    FROM (
+                        SELECT DISTINCT ON (p.parking_key)
+                               p.parking_key, p.parking_name,
+                               p.available_count, p.capacity, p.base_fee,
+                               ST_Distance(p.location,
+                                   ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography
+                               ) AS distance_m,
+                               p.observed_at
+                        FROM citydata_parking p
+                        WHERE p.area_cd = %s
+                          AND p.observed_at >= %s AND p.observed_at <= %s
+                          AND ST_DWithin(
+                              p.location,
+                              ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography,
+                              %s
+                          )
+                        ORDER BY p.parking_key, p.observed_at DESC
+                    ) latest
+                    ORDER BY distance_m, parking_name LIMIT 10
+                    """,
+                    (lon, lat, area_cd,
+                     now - LIVE_MAX_AGE, now + timedelta(minutes=5),
+                     lon, lat, PARKING_RADIUS_M),
+                )
+                parking = [
+                    {
+                        "name": name,
+                        "cur": available,
+                        "max": capacity,
+                        "fee": fee,
+                        "distance_m": round(float(distance)),
+                        "observed_at": _serialize_time(stamp),
+                        "source": "citydata_db",
+                    }
+                    for name, available, capacity, fee, distance, stamp in cur.fetchall()
+                ]
+            return traffic, parking
+    finally:
+        conn.close()
 
 
 def _monthly_pattern(month, board, alight, hour):
