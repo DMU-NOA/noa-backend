@@ -45,6 +45,7 @@ def test_query_rejects_ended_and_far_tour_festivals(monkeypatch):
     assert "f.event_start_date <= %s" in sql
     assert "f.event_start_date <= f.event_end_date" in sql
     assert params[:2] == (date(2026, 10, 11), date(2026, 11, 10))
+    assert "f.collected_at >= %s" in sql
     assert conn.closed
 
 
@@ -102,7 +103,6 @@ def test_tourist_without_citydata_uses_tourapi_events(monkeypatch):
 
 
 def test_citydata_events_deduplicate_with_existing_tourapi(monkeypatch):
-    future = date.today()
     ev = {"name": "행사", "period": "2026.10.11", "place":"서울",
           "status":"ongoing","start_date":"2026-10-11","end_date":"2026-10-11",
           "source":"tourapi","distance_m":200}

@@ -599,7 +599,7 @@ def _festival_status(start: date, end: date, today: date):
 def _event_period_dates(value: str):
     """Parse dated Seoul CityData events. Unverifiable date strings are excluded."""
     matches = re.findall(
-        r"(?<!\\d)(\\d{4})[^\\d]{0,5}(\\d{1,2})[^\\d]{0,5}(\\d{1,2})(?!\\d)",
+        r"(?<!\d)(\d{4})[^\d]{0,5}(\d{1,2})[^\d]{0,5}(\d{1,2})(?!\d)",
         str(value or ""),
     )
     try:
@@ -703,6 +703,7 @@ def _spot_festivals_and_area(spot_id: str, today: date | None = None):
                   AND f.event_start_date <= f.event_end_date
                   AND f.event_end_date >= %s
                   AND f.event_start_date <= %s
+                  AND f.collected_at >= %s
                   AND t.mapx IS NOT NULL AND t.mapy IS NOT NULL
                   AND ST_DWithin(
                       f.location,
@@ -716,6 +717,7 @@ def _spot_festivals_and_area(spot_id: str, today: date | None = None):
                 LIMIT 12
                 """,
                 (today, today + timedelta(days=FESTIVAL_DAYS_AHEAD),
+                 datetime.combine(today - timedelta(days=7), datetime.min.time(), ZoneInfo("Asia/Seoul")),
                  spot_id, spot_id, today),
             )
             festivals = []
