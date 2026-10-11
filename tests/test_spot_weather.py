@@ -86,3 +86,17 @@ def test_db_no_fresh_observation_returns_none(monkeypatch):
     monkeypatch.setattr(spot_weather, "get_db", lambda: Connection(cur))
     assert spot_weather.load_weather_from_db("123456", now=NOW) is None
     assert len(cur.commands) == 1
+
+
+def test_additional_info_for_unmapped_spot_uses_weather_without_citydata_api(monkeypatch):
+    from app.api.endpoints import spots
+    expected = {"temp": 22, "source": "citydata_db", "pm10": "보통"}
+    monkeypatch.setattr(spots, "_spot_festivals_and_area",
+                        lambda spot_id, today=None: (None, [], (127.0,37.5)))
+    monkeypatch.setattr(spots, "load_weather_from_db",
+                        lambda spot_id, area_cd, lang="ko": expected)
+    def forbidden(*a, **k): raise AssertionError("should not call the Seoul API")
+    monkeypatch.setattr(spots.requests, "get", forbidden)
+    result = spots.get_spot_additional_info("12345")
+    assert result["weather"] == expected
+    assert result["events"] == []

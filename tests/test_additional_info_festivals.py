@@ -1,5 +1,14 @@
 from datetime import date
+import pytest
 from app.api.endpoints import spots
+
+
+@pytest.fixture(autouse=True)
+def mock_weather_db(monkeypatch):
+    # Existing festival tests must not access a real CityData weather DB.
+    monkeypatch.setattr(spots, "load_weather_from_db",
+                        lambda spot_id, area_cd, lang="ko": None)
+
 
 
 class _FakeCursor:
@@ -121,6 +130,8 @@ def test_citydata_events_deduplicate_with_existing_tourapi(monkeypatch):
                 "CULTURALEVENTINFO":[{"EVENT_NM":"행사"}],
             }}
     monkeypatch.setattr(spots.requests,"get",lambda *a,**k: Response())
+    monkeypatch.setattr(spots, "live_weather_from_payload",
+                        lambda citydata, lang="ko": {"temp": "20"})
     result = spots.get_spot_additional_info("POI001")
     assert [e["name"] for e in result["events"]] == ["행사", "또다른 행사"]
     assert result["weather"]["temp"] == "20"

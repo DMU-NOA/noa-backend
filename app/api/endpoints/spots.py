@@ -753,7 +753,7 @@ def get_spot_additional_info(spot_id: str, lang: str = "ko"):
     area_cd, festivals, coords = _spot_festivals_and_area(spot_id, today=today)
     # Every tourist spot can use a recent observation from a nearby CityData area.
     # A true mapped area still prefers a fresh live API response if available.
-    db_weather = load_weather_from_db(spot_id, area_cd)
+    db_weather = load_weather_from_db(spot_id, area_cd, lang=lang)
     empty = {"weather": db_weather, "traffic": None, "parking_lots": [], "events": festivals}
     if not area_cd:
         return empty
