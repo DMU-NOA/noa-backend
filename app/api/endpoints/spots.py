@@ -580,93 +580,181 @@ def get_spot_forecast(spot_id: str, lang: str = "ko"):
         print(f"🚨 시간별 예측 API 에러: {e}")
         return {"forecast": []}
 
+def _spot_festivals_and_area(spot_id: str):
+    """Resolve a CityData area and nearby TourAPI festivals from the shared DB.
+
+    Festivals are only included if ongoing or starting within the next 30 days.
+    Their coordinates must be within 3 km of the selected tourism spot.
+    """
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COALESCE(
+                    (SELECT s.area_cd FROM seoul_spots s WHERE s.area_cd = %s),
+                    (SELECT m.area_cd FROM spot_mapping m WHERE m.content_id = %s)
+                )
+                """,
+                (spot_id, spot_id),
+            )
+            area_cd = cur.fetchone()[0]
+            cur.execute(
+                """
+                SELECT f.title, f.event_start_date, f.event_end_date,
+                       CONCAT_WS(' ', f.addr1, f.addr2) AS venue,
+                       CASE
+                         WHEN f.location IS NOT NULL
+                          AND t.mapx IS NOT NULL AND t.mapy IS NOT NULL
+                         THEN ST_Distance(
+                           f.location,
+                           ST_SetSRID(
+                             ST_MakePoint(t.mapx::double precision, t.mapy::double precision),
+                             4326
+                           )::geography
+                         )
+                         ELSE NULL
+                       END AS distance_m
+                FROM tour_spots t
+                LEFT JOIN spot_mapping m ON m.content_id = t.content_id
+                JOIN tour_festival f ON f.lang = 'ko'
+                  AND f.event_start_date IS NOT NULL
+                  AND f.event_end_date IS NOT NULL
+                  AND f.event_end_date >= (now() AT TIME ZONE 'Asia/Seoul')::date
+                  AND f.event_start_date <= (now() AT TIME ZONE 'Asia/Seoul')::date + 30
+                  AND (
+                    f.content_id = t.content_id
+                    OR (
+                      f.location IS NOT NULL
+                      AND t.mapx IS NOT NULL AND t.mapy IS NOT NULL
+                      AND ST_DWithin(
+                        f.location,
+                        ST_SetSRID(
+                          ST_MakePoint(t.mapx::double precision, t.mapy::double precision),
+                          4326
+                        )::geography,
+                        3000
+                      )
+                    )
+                  )
+                WHERE t.content_id = %s OR m.area_cd = %s
+                ORDER BY f.event_start_date, distance_m NULLS LAST, f.title
+                LIMIT 12
+                """,
+                (spot_id, spot_id),
+            )
+            festivals = [
+                {
+                    "name": name,
+                    "period": f"{start:%Y.%m.%d} ~ {end:%Y.%m.%d}",
+                    "place": venue or "",
+                    "source": "tourapi",
+                    "distance_m": round(float(distance), 0) if distance is not None else None,
+                }
+                for name, start, end, venue, distance in cur.fetchall()
+            ]
+            return area_cd, festivals
+    finally:
+        conn.close()
+
+
 @router.get("/spots/{spot_id}/additional-info")
 def get_spot_additional_info(spot_id: str, lang: str = "ko"):
-    try:
-        SEOUL_API_KEY = os.getenv("SEOUL_API_KEY")
-        seoul_api_type = "citydata_eng" if lang == "en" else "citydata"
-        url = f"http://openapi.seoul.go.kr:8088/{SEOUL_API_KEY}/json/{seoul_api_type}/1/5/{spot_id}"
-        
-        res = requests.get(url, timeout=10)
-        data = res.json()
-        citydata = data.get("CITYDATA", {})
-        
-        if not citydata:
-            return {"weather": None, "traffic": None, "parking_lots": [], "events": []}
+    # A TourAPI tourist spot may have festivals even if it has no CityData area.
+    # The old endpoint returned an entirely empty response in that situation.
+    area_cd, festivals = _spot_festivals_and_area(spot_id)
+    empty = {"weather": None, "traffic": None, "parking_lots": [], "events": festivals}
+    if not area_cd:
+        return empty
 
-        # 1. 🌤️ 24시간 날씨 및 상세 미세먼지
-        weather_data = citydata.get("WEATHER_STTS", [])
+    try:
+        api_key = os.getenv("SEOUL_API_KEY")
+        if not api_key:
+            return empty
+
+        api_type = "citydata_eng" if lang == "en" else "citydata"
+        url = f"http://openapi.seoul.go.kr:8088/{api_key}/json/{api_type}/1/5/{area_cd}"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        citydata = response.json().get("CITYDATA")
+        if not isinstance(citydata, dict):
+            return empty
+
+        # Preserve the existing weather/air-quality response contract.
+        weather_data = citydata.get("WEATHER_STTS") or []
+        if isinstance(weather_data, dict):
+            weather_data = [weather_data]
         weather = None
         if weather_data:
             w = weather_data[0]
-            fcst24_raw = w.get("FCST24HOURS", [])
-            if isinstance(fcst24_raw, dict): fcst24_raw = [fcst24_raw]
-            
+            raw_forecast = w.get("FCST24HOURS") or []
+            if isinstance(raw_forecast, dict):
+                raw_forecast = [raw_forecast]
             fcst24 = []
-            for f in fcst24_raw:
-                time_str = str(f.get("FCST_DT", ""))
-                hour = time_str[8:10] + ("시" if lang == "ko" else ":00") if len(time_str) >= 10 else "-"
+            for f in raw_forecast:
+                stamp = str(f.get("FCST_DT") or "")
+                hour = stamp[8:10] + ("시" if lang == "ko" else ":00") if len(stamp) >= 10 else "-"
                 fcst24.append({
-                    "time": hour,
-                    "temp": f.get("TEMP", "-"),
-                    "sky": f.get("SKY_STTS", "Clear"),
-                    "rain_chance": f.get("RAIN_CHANCE", "0")
+                    "time": hour, "temp": f.get("TEMP", "-"),
+                    "sky": f.get("SKY_STTS") or "정보 없음",
+                    "rain_chance": f.get("RAIN_CHANCE", "0"),
                 })
-
             weather = {
                 "temp": w.get("TEMP", "-"),
                 "pm10": w.get("PM10_INDEX", "-"),
-                "pm10_val": w.get("PM10", "-"), 
+                "pm10_val": w.get("PM10", "-"),
                 "pm25": w.get("PM25_INDEX", "-"),
-                "pm25_val": w.get("PM25", "-"), 
+                "pm25_val": w.get("PM25", "-"),
                 "humidity": w.get("HUMIDITY", "-"),
-                "msg": w.get("PCP_MSG", "") if lang == "en" else w.get("WEATHER_MSG", "맑음"),
-                "forecast24": fcst24
+                "msg": w.get("PCP_MSG", "") if lang == "en" else w.get("WEATHER_MSG", ""),
+                "forecast24": fcst24,
             }
 
-        # 2. 🚗 상세 교통 및 주차 현황
-        traffic_data = citydata.get("ROAD_TRAFFIC_STTS", {})
+        traffic_data = citydata.get("ROAD_TRAFFIC_STTS") or {}
         traffic = {
             "msg": "No traffic info." if lang == "en" else "주변 도로 소통 정보가 없습니다.",
-            "speed": "-"
+            "speed": "-",
         }
-        if isinstance(traffic_data, dict) and "AVG_ROAD_DATA" in traffic_data:
-            traffic["msg"] = traffic_data["AVG_ROAD_DATA"].get("ROAD_MSG", "Smooth" if lang == "en" else "원활")
-            traffic["speed"] = traffic_data["AVG_ROAD_DATA"].get("ROAD_TRAFFIC_SPD", "-")
+        if isinstance(traffic_data, dict) and isinstance(traffic_data.get("AVG_ROAD_DATA"), dict):
+            road = traffic_data["AVG_ROAD_DATA"]
+            traffic["msg"] = road.get("ROAD_MSG", traffic["msg"])
+            traffic["speed"] = road.get("ROAD_TRAFFIC_SPD", "-")
 
-        parking_data = citydata.get("PRK_STTS", [])
-        if isinstance(parking_data, dict): parking_data = [parking_data]
-        
-        parking_lots = []
-        for p in parking_data:
-            if p.get("PRK_NM"):
-                parking_lots.append({
-                    "name": p.get("PRK_NM"),
-                    "cur": p.get("CUR_PRK_CNT", 0),
-                    "max": p.get("CPCTY", 0),       
-                    "fee": p.get("RATES", 0)        
-                })
+        parking_data = citydata.get("PRK_STTS") or []
+        if isinstance(parking_data, dict):
+            parking_data = [parking_data]
+        parking_lots = [
+            {
+                "name": p["PRK_NM"], "cur": p.get("CUR_PRK_CNT", 0),
+                "max": p.get("CPCTY", 0), "fee": p.get("RATES", 0),
+            }
+            for p in parking_data if isinstance(p, dict) and p.get("PRK_NM")
+        ]
 
-        # 3. 🎪 문화/행사/축제
-        event_data = citydata.get("CULTURALEVENTINFO", [])
-        if isinstance(event_data, dict): event_data = [event_data]
-            
-        events = []
-        for ev in event_data:
-            if ev.get("EVENT_NM"):
-                events.append({
-                    "name": ev.get("EVENT_NM"),
-                    "period": ev.get("EVENT_PERIOD", ""),
-                    "place": ev.get("EVENT_PLACE", "")
-                })
+        seoul_events = citydata.get("CULTURALEVENTINFO") or []
+        if isinstance(seoul_events, dict):
+            seoul_events = [seoul_events]
+        events = list(festivals)
+        seen = {(e["name"].strip().casefold(), e["place"].strip().casefold()) for e in events}
+        for ev in seoul_events:
+            if not isinstance(ev, dict) or not ev.get("EVENT_NM"):
+                continue
+            new_event = {
+                "name": ev["EVENT_NM"],
+                "period": ev.get("EVENT_PERIOD", ""),
+                "place": ev.get("EVENT_PLACE", ""),
+                "source": "seoul_citydata",
+            }
+            key = (new_event["name"].strip().casefold(), new_event["place"].strip().casefold())
+            if key not in seen:
+                events.append(new_event)
+                seen.add(key)
 
         return {
-            "weather": weather,
-            "traffic": traffic,
-            "parking_lots": parking_lots,
-            "events": events
+            "weather": weather, "traffic": traffic,
+            "parking_lots": parking_lots, "events": events,
         }
-        
-    except Exception as e:
-        print(f"🚨 부가정보 상세 API 에러: {e}")
-        return {"weather": None, "traffic": None, "parking_lots": [], "events": []}
+    except Exception as exc:
+        print(f"부가정보 CityData 조회 실패 ({area_cd}): {exc}")
+        # External API failure must not hide already-loaded festival data.
+        return empty
