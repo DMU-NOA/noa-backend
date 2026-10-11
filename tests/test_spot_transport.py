@@ -103,3 +103,32 @@ def test_detail_additional_info_keeps_festivals_and_weather_when_no_live_traffic
     assert result["events"][0]["name"] == "축제"
     assert result["weather"] == expected_weather
     assert result["traffic"] is None
+
+
+def test_mapped_spot_combines_live_road_parking_and_transit(monkeypatch):
+    monkeypatch.setattr(spots, "_spot_festivals_and_area",
+                        lambda spot_id, today=None: ("POI001", [], (127.0, 37.5)))
+    monkeypatch.setattr(spots, "load_weather_from_db",
+                        lambda spot_id, area_cd, lang="ko": None)
+    near = {"subway": [], "bus": [{"name": "정류장"}], "hour": 15}
+    monkeypatch.setattr(spots, "load_nearby_transit", lambda spot_id: near)
+    monkeypatch.setattr(spots, "live_weather_from_payload",
+                        lambda payload, lang="ko": None)
+    monkeypatch.setattr(spots, "live_transport_from_citydata",
+                        lambda payload, coords: (
+                            {"speed": 30.0, "observed_at": NOW.isoformat()},
+                            [{"name": "주차장", "cur": 7, "max": 30}],
+                        ))
+    monkeypatch.setenv("SEOUL_API_KEY", "fake-key")
+
+    class Response:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"CITYDATA": {"AREA_CD": "POI001"}}
+
+    monkeypatch.setattr(spots.requests, "get", lambda *a, **k: Response())
+    data = spots.get_spot_additional_info("POI001")
+    assert data["traffic"]["speed"] == 30
+    assert data["parking_lots"][0]["cur"] == 7
+    assert data["transit"] == near
+    assert data["events"] == []
