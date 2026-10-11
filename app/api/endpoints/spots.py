@@ -1,4 +1,8 @@
 from fastapi import APIRouter, HTTPException
+from datetime import date, datetime, timedelta
+from math import asin, cos, radians, sin, sqrt
+from zoneinfo import ZoneInfo
+import re
 from app.scripts.db import get_db
 import os
 import requests
@@ -580,12 +584,85 @@ def get_spot_forecast(spot_id: str, lang: str = "ko"):
         print(f"🚨 시간별 예측 API 에러: {e}")
         return {"forecast": []}
 
-def _spot_festivals_and_area(spot_id: str):
-    """Resolve a CityData area and nearby TourAPI festivals from the shared DB.
+# Date windows and coordinates for every festival use the tourist's local date.
+FESTIVAL_RADIUS_M = 3000
+FESTIVAL_DAYS_AHEAD = 30
 
-    Festivals are only included if ongoing or starting within the next 30 days.
-    Their coordinates must be within 3 km of the selected tourism spot.
-    """
+
+def _festival_status(start: date, end: date, today: date):
+    """Ended and too-distant-future events are not suitable for the detail page."""
+    if start > end or end < today or start > today + timedelta(days=FESTIVAL_DAYS_AHEAD):
+        return None
+    return "ongoing" if start <= today else "upcoming"
+
+
+def _event_period_dates(value: str):
+    """Parse dated Seoul CityData events. Unverifiable date strings are excluded."""
+    matches = re.findall(
+        r"(?<!\\d)(\\d{4})[^\\d]{0,5}(\\d{1,2})[^\\d]{0,5}(\\d{1,2})(?!\\d)",
+        str(value or ""),
+    )
+    try:
+        dates = [date(int(y), int(m), int(d)) for y, m, d in matches]
+    except ValueError:
+        return None
+    if not dates:
+        return None
+    if len(dates) == 1 and any(mark in str(value) for mark in ("~", "～", "부터", "까지")):
+        # Ambiguous intervals (missing end year) cannot be reliably validated.
+        return None
+    return (dates[0], dates[-1])
+
+
+def _distance_meters(lon1, lat1, lon2, lat2):
+    """Haversine distance for Seoul CityData events with coordinates."""
+    x1, y1, x2, y2 = map(float, (lon1, lat1, lon2, lat2))
+    if not (-180 <= x1 <= 180 and -180 <= x2 <= 180
+            and -90 <= y1 <= 90 and -90 <= y2 <= 90):
+        raise ValueError("Invalid event coordinates")
+    d_lat, d_lon = radians(y2 - y1), radians(x2 - x1)
+    a = sin(d_lat / 2) ** 2 + cos(radians(y1)) * cos(radians(y2)) * sin(d_lon / 2) ** 2
+    return 2 * 6371000 * asin(min(1.0, sqrt(a)))
+
+
+def _seoul_events_in_radius(items, coords, today):
+    """Only geolocated, dated CityData events within the same 3 km radius."""
+    if coords is None:
+        return []
+    lon, lat = coords
+    result = []
+    for event in items:
+        if not isinstance(event, dict) or not event.get("EVENT_NM"):
+            continue
+        period = _event_period_dates(event.get("EVENT_PERIOD", ""))
+        if not period:
+            continue
+        start, end = period
+        status = _festival_status(start, end, today)
+        if status is None:
+            continue
+        try:
+            distance = _distance_meters(lon, lat, event["EVENT_X"], event["EVENT_Y"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        if distance > FESTIVAL_RADIUS_M:
+            continue
+        result.append({
+            "name": str(event["EVENT_NM"]),
+            "period": str(event.get("EVENT_PERIOD") or ""),
+            "place": str(event.get("EVENT_PLACE") or ""),
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "status": status,
+            "source": "seoul_citydata",
+            "distance_m": round(distance),
+        })
+    return result
+
+
+def _spot_festivals_and_area(spot_id: str, today: date | None = None):
+    """Resolve area + spot coordinates, then fetch only dated 3 km TourAPI events."""
+    today = today or datetime.now(ZoneInfo("Asia/Seoul")).date()
     conn = get_db()
     try:
         with conn.cursor() as cur:
@@ -594,66 +671,73 @@ def _spot_festivals_and_area(spot_id: str):
                 SELECT COALESCE(
                     (SELECT s.area_cd FROM seoul_spots s WHERE s.area_cd = %s),
                     (SELECT m.area_cd FROM spot_mapping m WHERE m.content_id = %s)
-                )
+                ), place.mapx, place.mapy
+                FROM (SELECT 1) AS anchor
+                LEFT JOIN LATERAL (
+                    SELECT t.mapx, t.mapy
+                    FROM tour_spots t
+                    LEFT JOIN spot_mapping m ON m.content_id = t.content_id
+                    WHERE t.content_id = %s OR m.area_cd = %s
+                    LIMIT 1
+                ) place ON TRUE
                 """,
-                (spot_id, spot_id),
+                (spot_id, spot_id, spot_id, spot_id),
             )
-            area_cd = cur.fetchone()[0]
+            area_cd, longitude, latitude = cur.fetchone()
             cur.execute(
                 """
                 SELECT f.title, f.event_start_date, f.event_end_date,
                        CONCAT_WS(' ', f.addr1, f.addr2) AS venue,
-                       CASE
-                         WHEN f.location IS NOT NULL
-                          AND t.mapx IS NOT NULL AND t.mapy IS NOT NULL
-                         THEN ST_Distance(
+                       ST_Distance(
                            f.location,
-                           ST_SetSRID(
-                             ST_MakePoint(t.mapx::double precision, t.mapy::double precision),
-                             4326
-                           )::geography
-                         )
-                         ELSE NULL
-                       END AS distance_m
+                           ST_SetSRID(ST_MakePoint(t.mapx::double precision,
+                                                   t.mapy::double precision), 4326)::geography
+                       ) AS distance_m
                 FROM tour_spots t
                 LEFT JOIN spot_mapping m ON m.content_id = t.content_id
-                JOIN tour_festival f ON f.lang = 'ko'
+                JOIN tour_festival f
+                  ON f.lang = 'ko'
+                  AND f.location IS NOT NULL
                   AND f.event_start_date IS NOT NULL
                   AND f.event_end_date IS NOT NULL
-                  AND f.event_end_date >= (now() AT TIME ZONE 'Asia/Seoul')::date
-                  AND f.event_start_date <= (now() AT TIME ZONE 'Asia/Seoul')::date + 30
-                  AND (
-                    f.content_id = t.content_id
-                    OR (
-                      f.location IS NOT NULL
-                      AND t.mapx IS NOT NULL AND t.mapy IS NOT NULL
-                      AND ST_DWithin(
-                        f.location,
-                        ST_SetSRID(
-                          ST_MakePoint(t.mapx::double precision, t.mapy::double precision),
-                          4326
-                        )::geography,
-                        3000
-                      )
-                    )
+                  AND f.event_start_date <= f.event_end_date
+                  AND f.event_end_date >= %s
+                  AND f.event_start_date <= %s
+                  AND t.mapx IS NOT NULL AND t.mapy IS NOT NULL
+                  AND ST_DWithin(
+                      f.location,
+                      ST_SetSRID(ST_MakePoint(t.mapx::double precision,
+                                              t.mapy::double precision), 4326)::geography,
+                      3000
                   )
                 WHERE t.content_id = %s OR m.area_cd = %s
-                ORDER BY f.event_start_date, distance_m NULLS LAST, f.title
+                ORDER BY CASE WHEN f.event_start_date <= %s THEN 0 ELSE 1 END,
+                         f.event_start_date, distance_m, f.title
                 LIMIT 12
                 """,
-                (spot_id, spot_id),
+                (today, today + timedelta(days=FESTIVAL_DAYS_AHEAD),
+                 spot_id, spot_id, today),
             )
-            festivals = [
-                {
+            festivals = []
+            for name, start, end, venue, distance in cur.fetchall():
+                status = _festival_status(start, end, today)
+                if status is None:
+                    continue
+                festivals.append({
                     "name": name,
                     "period": f"{start:%Y.%m.%d} ~ {end:%Y.%m.%d}",
                     "place": venue or "",
+                    "start_date": start.isoformat(),
+                    "end_date": end.isoformat(),
+                    "status": status,
                     "source": "tourapi",
-                    "distance_m": round(float(distance), 0) if distance is not None else None,
-                }
-                for name, start, end, venue, distance in cur.fetchall()
-            ]
-            return area_cd, festivals
+                    "distance_m": round(float(distance)),
+                })
+            coords = (
+                (float(longitude), float(latitude))
+                if longitude is not None and latitude is not None else None
+            )
+            return area_cd, festivals, coords
     finally:
         conn.close()
 
@@ -662,7 +746,8 @@ def _spot_festivals_and_area(spot_id: str):
 def get_spot_additional_info(spot_id: str, lang: str = "ko"):
     # A TourAPI tourist spot may have festivals even if it has no CityData area.
     # The old endpoint returned an entirely empty response in that situation.
-    area_cd, festivals = _spot_festivals_and_area(spot_id)
+    today = datetime.now(ZoneInfo("Asia/Seoul")).date()
+    area_cd, festivals, coords = _spot_festivals_and_area(spot_id, today=today)
     empty = {"weather": None, "traffic": None, "parking_lots": [], "events": festivals}
     if not area_cd:
         return empty
@@ -736,19 +821,13 @@ def get_spot_additional_info(spot_id: str, lang: str = "ko"):
             seoul_events = [seoul_events]
         events = list(festivals)
         seen = {(e["name"].strip().casefold(), e["place"].strip().casefold()) for e in events}
-        for ev in seoul_events:
-            if not isinstance(ev, dict) or not ev.get("EVENT_NM"):
-                continue
-            new_event = {
-                "name": ev["EVENT_NM"],
-                "period": ev.get("EVENT_PERIOD", ""),
-                "place": ev.get("EVENT_PLACE", ""),
-                "source": "seoul_citydata",
-            }
+        for new_event in _seoul_events_in_radius(seoul_events, coords, today):
             key = (new_event["name"].strip().casefold(), new_event["place"].strip().casefold())
             if key not in seen:
                 events.append(new_event)
                 seen.add(key)
+        events.sort(key=lambda e: (e["status"] != "ongoing",
+                                   e["start_date"], e["distance_m"]))
 
         return {
             "weather": weather, "traffic": traffic,
