@@ -26,14 +26,17 @@ SELECT
     THEN COALESCE(NULLIF(t.address_en, ''), t.address)
     ELSE t.address END AS address,
   t.mapx, t.mapy,
-  COALESCE(a.congestion_level, '데이터 없음') AS congestion_level,
-  a.source AS congestion_source,
-  a.updated_at
+  COALESCE(a.congestion_level, pr.congestion_level, '데이터 없음') AS congestion_level,
+  COALESCE(a.source, pr.source) AS congestion_source,
+  COALESCE(a.updated_at, pr.updated_at) AS updated_at
 FROM tour_spots t
 LEFT JOIN spot_mapping m ON m.content_id = t.content_id
 LEFT JOIN seoul_spots s ON s.area_cd = m.area_cd
 LEFT JOIN latest_congestion a
   ON a.content_id = t.content_id AND a.source = 'actual'
+LEFT JOIN latest_congestion pr
+  ON pr.content_id = t.content_id AND pr.source = 'predicted'
+  AND a.content_id IS NULL
 """
 
 
