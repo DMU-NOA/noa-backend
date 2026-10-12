@@ -1,105 +1,266 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+from typing import Optional
+
 from app.api.dependencies import get_current_user
 from app.scripts.db import get_db
 
+
 router = APIRouter()
 
+
 class LikeRequest(BaseModel):
-    area_cd: str
+    spot_id: str
+    area_cd: Optional[str] = None
+    content_id: str
+
 
 @router.get("")
 def get_likes(user=Depends(get_current_user), lang: str = "ko"):
     """내 좋아요 목록"""
     conn = get_db()
     cur = conn.cursor()
-    try:
-        name_col = "COALESCE(s.name_en, s.name)" if lang == "en" else "s.name"
-        addr_col = "COALESCE(t.address_en, t.address)" if lang == "en" else "t.address"
-        lvl_col = "COALESCE(c.congestion_level_en, c.congestion_level)" if lang == "en" else "c.congestion_level"
 
-        # 💡 내부의 '#' 주석을 모두 제거한 깔끔한 SQL문
-        cur.execute(f"""
-            SELECT s.area_cd, {name_col}, s.category,
-                   t.image_url, {addr_col}, {lvl_col}
+    try:
+        if lang == "en":
+            name_col = """
+                CASE
+                    WHEN l.area_cd IS NOT NULL
+                    THEN COALESCE(s.name_en, s.name, t.name_en, t.name)
+                    ELSE COALESCE(t.name_en, t.name)
+                END
+            """
+
+            address_col = "COALESCE(t.address_en, t.address)"
+
+        else:
+            name_col = """
+                CASE
+                    WHEN l.area_cd IS NOT NULL
+                    THEN COALESCE(s.name, t.name)
+                    ELSE t.name
+                END
+            """
+
+            address_col = "t.address"
+
+        cur.execute(
+            f"""
+            SELECT
+                COALESCE(l.area_cd, l.content_id) AS spot_id,
+                l.area_cd,
+                l.content_id,
+
+                {name_col} AS name,
+
+                CASE
+                    WHEN l.area_cd IS NOT NULL
+                    THEN COALESCE(s.category, t.category)
+                    ELSE t.category
+                END AS category,
+
+                t.image_url,
+                {address_col} AS address,
+
+                lc.congestion_level,
+                lc.source
+
             FROM likes l
-            JOIN seoul_spots s ON l.area_cd = s.area_cd
-            LEFT JOIN spot_mapping m ON s.area_cd = m.area_cd
-            LEFT JOIN tour_spots t ON m.content_id = t.content_id
-            LEFT JOIN (
-                SELECT DISTINCT ON (area_cd) area_cd, congestion_level, congestion_level_en
-                FROM congestion_data
-                ORDER BY area_cd, updated_at DESC
-            ) c ON s.area_cd = c.area_cd
-            WHERE l.social_id = %s AND l.provider = %s
+
+            JOIN tour_spots t
+                ON l.content_id = t.content_id
+
+            LEFT JOIN seoul_spots s
+                ON l.area_cd = s.area_cd
+
+            LEFT JOIN latest_congestion lc
+                ON l.content_id = lc.content_id
+
+            WHERE
+                l.social_id = %s
+                AND l.provider = %s
+
             ORDER BY l.created_at DESC
-        """, (user["sub"], user["provider"]))
+            """,
+            (
+                user["sub"],
+                user["provider"]
+            )
+        )
+
         rows = cur.fetchall()
-        
-        no_data_msg = "No Data" if lang == "en" else "데이터 없음"
-        
+
+        no_data_msg = (
+            "No Data"
+            if lang == "en"
+            else "데이터 없음"
+        )
+
         return [
             {
-                "area_cd": r[0],
-                "name": r[1],
-                "category": r[2],
-                "image_url": r[3],
-                "address": r[4],
-                "congestion_level": r[5] or no_data_msg
+                "spot_id": row[0],
+                "area_cd": row[1],
+                "content_id": row[2],
+
+                "name": row[3],
+                "category": row[4],
+
+                "image_url": row[5],
+                "address": row[6],
+
+                "congestion_level": (
+                    row[7]
+                    if row[7]
+                    else no_data_msg
+                ),
+
+                "congestion_source": row[8]
             }
-            for r in rows
+            for row in rows
         ]
+
     finally:
         cur.close()
         conn.close()
 
 
 @router.post("")
-def add_like(body: LikeRequest, user=Depends(get_current_user)):
+def add_like(
+    body: LikeRequest,
+    user=Depends(get_current_user)
+):
     """좋아요 추가"""
+
     conn = get_db()
     cur = conn.cursor()
+
     try:
-        cur.execute("""
-            INSERT INTO likes (social_id, provider, area_cd)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (social_id, provider, area_cd) DO NOTHING
-        """, (user["sub"], user["provider"], body.area_cd))
+        # content_id 기준 중복 확인
+        cur.execute(
+            """
+            SELECT 1
+            FROM likes
+            WHERE
+                social_id = %s
+                AND provider = %s
+                AND content_id = %s
+            """,
+            (
+                user["sub"],
+                user["provider"],
+                body.content_id
+            )
+        )
+
+        exists = cur.fetchone()
+
+        if exists:
+            return {"ok": True}
+
+        cur.execute(
+            """
+            INSERT INTO likes (
+                social_id,
+                provider,
+                area_cd,
+                content_id
+            )
+            VALUES (%s, %s, %s, %s)
+            """,
+            (
+                user["sub"],
+                user["provider"],
+                body.area_cd,
+                body.content_id
+            )
+        )
+
         conn.commit()
-        return {"ok": True}
+
+        return {
+            "ok": True,
+            "spot_id": body.spot_id
+        }
+
     finally:
         cur.close()
         conn.close()
 
 
-@router.delete("/{area_cd}")
-def remove_like(area_cd: str, user=Depends(get_current_user)):
+@router.delete("/{spot_id}")
+def remove_like(
+    spot_id: str,
+    user=Depends(get_current_user)
+):
     """좋아요 취소"""
+
     conn = get_db()
     cur = conn.cursor()
+
     try:
-        cur.execute("""
+        cur.execute(
+            """
             DELETE FROM likes
-            WHERE social_id = %s AND provider = %s AND area_cd = %s
-        """, (user["sub"], user["provider"], area_cd))
+            WHERE
+                social_id = %s
+                AND provider = %s
+                AND (
+                    area_cd = %s
+                    OR content_id = %s
+                )
+            """,
+            (
+                user["sub"],
+                user["provider"],
+                spot_id,
+                spot_id
+            )
+        )
+
         conn.commit()
+
         return {"ok": True}
+
     finally:
         cur.close()
         conn.close()
 
 
-@router.get("/check/{area_cd}")
-def check_like(area_cd: str, user=Depends(get_current_user)):
+@router.get("/check/{spot_id}")
+def check_like(
+    spot_id: str,
+    user=Depends(get_current_user)
+):
     """특정 장소 좋아요 여부 확인"""
+
     conn = get_db()
     cur = conn.cursor()
+
     try:
-        cur.execute("""
-            SELECT 1 FROM likes
-            WHERE social_id = %s AND provider = %s AND area_cd = %s
-        """, (user["sub"], user["provider"], area_cd))
-        return {"liked": cur.fetchone() is not None}
+        cur.execute(
+            """
+            SELECT 1
+            FROM likes
+            WHERE
+                social_id = %s
+                AND provider = %s
+                AND (
+                    area_cd = %s
+                    OR content_id = %s
+                )
+            """,
+            (
+                user["sub"],
+                user["provider"],
+                spot_id,
+                spot_id
+            )
+        )
+
+        return {
+            "liked": cur.fetchone() is not None
+        }
+
     finally:
         cur.close()
         conn.close()

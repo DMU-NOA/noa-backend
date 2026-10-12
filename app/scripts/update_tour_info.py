@@ -19,7 +19,7 @@ def update_tour_info():
     cur.execute("""
         SELECT content_id 
         FROM tour_spots 
-        WHERE description = '상세 설명 준비 중' OR description IS NULL
+        WHERE description = '상세 설명 준비 중' OR description IS NULL OR TRIM(description) = ''
     """)
     cids = [row[0] for row in cur.fetchall()]
     
