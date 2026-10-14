@@ -68,8 +68,8 @@ def _valid_forecasts(rows, now, lang):
 def load_weather_from_db(spot_id, area_cd=None, *, lang="ko", now=None):
     """Select current weather from mapped region or nearest stored <=1km area.
 
-    Weather is only displayed when observed in the last 3 hours.
-    It returns None when no appropriately fresh, geographically linked observation exists.
+    If live observations are missing, show the most recent stored observation as historical reference.
+    Never label stale records as current or produce expired forecasts.
     """
     now = now or datetime.now(KST)
     conn = get_db()
@@ -103,24 +103,24 @@ def load_weather_from_db(spot_id, area_cd=None, *, lang="ko", now=None):
                     SELECT area_cd, weather_time, temperature, humidity,
                            precipitation, precpt_type, pm10, pm25
                     FROM citydata_weather
-                    WHERE area_cd = n.area_cd AND weather_time >= %s
-                      AND weather_time <= %s
+                    WHERE area_cd = n.area_cd AND weather_time <= %s
                     ORDER BY weather_time DESC LIMIT 1
                 ) w ON true
                 ORDER BY (n.distance_m >= 0), n.distance_m, w.weather_time DESC
                 LIMIT 1
                 """,
                 (area_cd, area_cd, spot_id, spot_id,
-                 now - MAX_WEATHER_AGE, now + timedelta(minutes=5)),
+                 now + timedelta(minutes=5)),
             )
             data = cur.fetchone()
             if not data:
                 return None
             (source_area, observed_at, temp, humidity, precipitation,
              precpt_type, pm10, pm25, distance) = data
-            observed_at = _recent_time(observed_at, now)
-            if observed_at is None:
-                return None
+            if observed_at.tzinfo is None:
+                observed_at = observed_at.replace(tzinfo=KST)
+            observed_at = observed_at.astimezone(KST)
+            is_stale = now - observed_at > MAX_WEATHER_AGE
 
             cur.execute(
                 """
@@ -149,6 +149,7 @@ def load_weather_from_db(spot_id, area_cd=None, *, lang="ko", now=None):
                 "distance_m": round(float(distance)) if distance is not None and distance >= 0 else None,
                 "observed_at": observed_at.isoformat(),
                 "nearby": distance is not None and distance >= 0,
+                "stale": is_stale,
             }
     finally:
         conn.close()

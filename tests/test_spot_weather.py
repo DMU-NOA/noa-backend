@@ -74,6 +74,7 @@ def test_db_nearby_returns_weather_and_origin(monkeypatch):
     assert value["pm10"] == "보통"
     assert value["pm25"] == "보통"
     assert value["nearby"] is True
+    assert value["stale"] is False
     assert value["distance_m"] == 470
     assert value["source_area_cd"] == "POI024"
     assert len(value["forecast24"]) == 1
@@ -104,3 +105,17 @@ def test_additional_info_for_unmapped_spot_uses_weather_without_citydata_api(mon
     result = spots.get_spot_additional_info("12345")
     assert result["weather"] == expected
     assert result["events"] == []
+
+
+def test_db_returns_last_historical_reading_as_stale(monkeypatch):
+    stamp = NOW - timedelta(days=3)
+    cur = Cursor(("POI024", stamp, 19, 65, "-", "없음", 42, 23, 470.0))
+    monkeypatch.setattr(spot_weather, "get_db", lambda: Connection(cur))
+    value = spot_weather.load_weather_from_db("123456", now=NOW)
+    assert value["stale"] is True
+    assert value["observed_at"] == stamp.isoformat()
+    assert value["temp"] == 19
+    assert value["pm10"] == "보통"
+    assert "weather_time <= %s" in cur.commands[0][0]
+    assert len(cur.commands[0][1]) == 5
+    assert value["forecast24"] == []
