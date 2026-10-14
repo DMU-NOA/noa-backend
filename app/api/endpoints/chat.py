@@ -1,107 +1,125 @@
-# app/api/endpoints/chat.py
-import os
+"""NOA chat recommendations based on the same latest_congestion source as spot cards."""
 import json
+import logging
+import os
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from openai import OpenAI
 from app.scripts.db import get_db
 
 router = APIRouter()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+logger = logging.getLogger(__name__)
+
 
 class ChatRequest(BaseModel):
     message: str
-    lat: float = None
-    lng: float = None
+    lat: float | None = None
+    lng: float | None = None
     lang: str = "ko"
+
+
+def _candidates(lang: str):
+    """Use current spot records, not legacy congestion_data or a nonexistent _en column."""
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COALESCE(NULLIF(t.name_en, ''), t.name)
+                           AS display_name_en,
+                       t.name, t.content_id, m.area_cd, t.image_url,
+                       l.congestion_level
+                FROM latest_congestion l
+                JOIN tour_spots t ON t.content_id = l.content_id
+                LEFT JOIN spot_mapping m ON m.content_id = t.content_id
+                WHERE l.congestion_level IN ('여유', '보통')
+                  AND t.name IS NOT NULL
+                ORDER BY
+                  CASE WHEN l.source = 'actual' THEN 0 ELSE 1 END,
+                  t.content_id
+                LIMIT 50
+                """
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return [
+        {
+            "spot_id": str(content_id),
+            "area_cd": str(content_id),
+            "name": name_en if lang == "en" else name,
+            "image_url": image_url,
+            "congestion_level": level,
+        }
+        for name_en, name, content_id, _area_cd, image_url, level in rows
+    ]
+
+
+def _fallback(candidates, lang):
+    if not candidates:
+        return {"reply": (
+            "There are no uncrowded locations to recommend from the available data."
+            if lang == "en" else "현재 저장된 혼잡도 데이터에서 추천할 여유로운 장소를 찾지 못했습니다."
+        ), "spot": None}
+    return {
+        "reply": (
+            "AI recommendations are temporarily unavailable. Here is a place selected from the stored congestion data."
+            if lang == "en" else
+            "AI 추천을 잠시 이용할 수 없어 저장된 혼잡도 데이터를 기준으로 장소를 안내해 드립니다."
+        ),
+        "spot": candidates[0],
+    }
+
 
 @router.post("/")
 async def chat_with_ai(req: ChatRequest):
-    conn = get_db()
-    cur = conn.cursor()
-    
-    # 💡 1. lang에 따라 한/영 컬럼 선택
-    name_col = "COALESCE(t.name_en, t.name)" if req.lang == "en" else "t.name"
-    lvl_col = "COALESCE(c.congestion_level_en, c.congestion_level)" if req.lang == "en" else "c.congestion_level"
-    
-    cur.execute(f"""
-        SELECT {name_col}, {lvl_col}, m.area_cd, t.image_url
-        FROM tour_spots t
-        JOIN spot_mapping m ON t.content_id = m.content_id
-        JOIN congestion_data c ON m.area_cd = c.area_cd
-        WHERE c.congestion_level IN ('여유', '보통')
-        ORDER BY RANDOM()
-        LIMIT 3
-    """)
-    candidates = cur.fetchall()
-    cur.close()
-    conn.close()
+    try:
+        candidates = _candidates(req.lang)
+    except Exception:
+        logger.exception("Chat candidate database lookup failed")
+        raise HTTPException(status_code=503, detail="추천 데이터를 일시적으로 조회할 수 없습니다.")
 
     if not candidates:
-        empty_msg = "I can't find any uncrowded places right now 😭 Please try again later!" if req.lang == "en" else "현재 추천해 드릴 만한 여유로운 장소가 파악되지 않네요 😭 잠시 후 다시 시도해 주세요!"
-        return {"reply": empty_msg}
+        return _fallback(candidates, req.lang)
 
-    # 2. AI에게 넘겨줄 정보 세팅
-    candidate_info = "\n".join([f"- ID: {area_cd} | Name: {name} | Congestion: {lvl} | Image: {img}" for name, lvl, area_cd, img in candidates])
+    # Only candidate IDs from the database can become a recommended spot.
+    sample = candidates[:12]
+    key = os.getenv("OPENAI_API_KEY")
+    if not key:
+        logger.warning("Chat OpenAI key missing; returning DB-based recommendation")
+        return _fallback(sample, req.lang)
 
-    # 💡 3. AI 프롬프트 다국어 완벽 분기
-    if req.lang == "en":
-        system_prompt = f"""
-        You are 'NOA', a friendly and smart AI travel assistant for Seoul.
-        Read the user's input and recommend exactly 1 place from the [Candidate Places] below.
-        
-        [Candidate Places]
-        {candidate_info}
-        
-        Rules:
-        1. Explain kindly why you recommend this place based on data (congestion, theme, etc.). You MUST answer in English.
-        2. You MUST respond ONLY in the following JSON format. Do not add any other text.
-        
-        {{
-            "reply": "I recommend Mokdong Shooting Range for a rainy day! It's indoors and currently not crowded...",
-            "spot": {{
-                "area_cd": "POI002",
-                "name": "Mokdong Shooting Range",
-                "image_url": "http...",
-                "congestion_level": "Relax"
-            }}
-        }}
-        """
-    else:
-        system_prompt = f"""
-        너는 서울 여행을 도와주는 친절하고 센스 있는 AI 비서 'NOA'야.
-        사용자의 질문을 읽고, 아래에 제공된 [현재 쾌적한 장소 후보] 중에서 가장 적절한 1곳을 골라 추천해 줘.
-        
-        [현재 쾌적한 장소 후보]
-        {candidate_info}
-        
-        규칙:
-        1. 데이터(혼잡도, 테마 등)를 바탕으로 왜 이곳을 추천하는지 친절하게 한국어로 설명할 것.
-        2. 반드시 아래의 JSON 형식으로만 응답할 것. 절대 다른 텍스트를 덧붙이지 마.
-        
-        {{
-            "reply": "비 오는 날에는 목동사격장을 추천할게요! 현재 혼잡도도 여유롭고...",
-            "spot": {{
-                "area_cd": "POI002",
-                "name": "목동사격장",
-                "image_url": "http...",
-                "congestion_level": "여유"
-            }}
-        }}
-        """
-
+    descriptions = "\n".join(
+        f"ID: {c['spot_id']} | Name: {c['name']} | Congestion: {c['congestion_level']}"
+        for c in sample
+    )
+    system = (
+        "You are NOA, a Seoul travel assistant. Respond in English."
+        if req.lang == "en" else
+        "너는 서울 여행 도우미 NOA다. 친절하게 한국어로 답변해."
+    )
+    system += (
+        "\nPick exactly one location from these real candidate records and do not invent an ID. "
+        "Return a JSON object with keys reply (helpful answer to the user) "
+        "and spot_id (one candidate ID).\nCandidates:\n" + descriptions
+    )
     try:
-        response = client.chat.completions.create(
+        response = OpenAI(api_key=key).chat.completions.create(
             model="gpt-4o-mini",
-            response_format={ "type": "json_object" }, # 💡 무조건 JSON으로 반환하도록 강제
+            response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": req.message}
-            ]
+                {"role": "system", "content": system},
+                {"role": "user", "content": req.message},
+            ],
+            timeout=20,
         )
-        # 문자열을 파이썬 딕셔너리로 변환하여 바로 리턴!
-        ai_result = json.loads(response.choices[0].message.content)
-        return ai_result
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AI 연결 오류: {str(e)}")
+        result = json.loads(response.choices[0].message.content or "{}")
+        chosen = next((c for c in sample if c["spot_id"] == str(result.get("spot_id"))), None)
+        if chosen and isinstance(result.get("reply"), str) and result["reply"].strip():
+            return {"reply": result["reply"], "spot": chosen}
+        logger.warning("Chat AI returned invalid candidate; using DB fallback")
+    except Exception:
+        logger.exception("Chat OpenAI request failed; using DB fallback")
+
+    return _fallback(sample, req.lang)
