@@ -4,7 +4,7 @@ from math import asin, cos, radians, sin, sqrt
 from zoneinfo import ZoneInfo
 import re
 from app.scripts.db import get_db
-from app.api.endpoints.spot_weather import load_weather_from_db, live_weather_from_payload
+from app.api.endpoints.spot_weather import load_weather_from_db, live_weather_from_payload, resolve_citydata_area
 from app.api.endpoints.spot_transport import load_nearby_transit, load_recent_road_parking
 from app.api.endpoints.hourly_forecast import get_hourly_forecast
 import os
@@ -725,16 +725,16 @@ def get_spot_additional_info(spot_id: str, lang: str = "ko"):
         "parking_lots": parking_lots, "events": festivals,
         "transit": nearby_transit,
     }
-    if not area_cd:
-        return empty
-
     try:
+        live_area_cd = resolve_citydata_area(spot_id, area_cd)
+        if not live_area_cd:
+            return empty
         api_key = os.getenv("SEOUL_API_KEY")
         if not api_key:
             return empty
 
         api_type = "citydata_eng" if lang == "en" else "citydata"
-        url = f"http://openapi.seoul.go.kr:8088/{api_key}/json/{api_type}/1/5/{area_cd}"
+        url = f"http://openapi.seoul.go.kr:8088/{api_key}/json/{api_type}/1/5/{live_area_cd}"
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         citydata = response.json().get("CITYDATA")
@@ -742,6 +742,8 @@ def get_spot_additional_info(spot_id: str, lang: str = "ko"):
             return empty
 
         weather = live_weather_from_payload(citydata, lang=lang) or db_weather
+        if weather and weather.get('source') == 'citydata_live_api' and not area_cd:
+            weather = {**weather, 'nearby': True}
 
         seoul_events = citydata.get("CULTURALEVENTINFO") or []
         if isinstance(seoul_events, dict):
@@ -762,6 +764,6 @@ def get_spot_additional_info(spot_id: str, lang: str = "ko"):
             "transit": nearby_transit,
         }
     except Exception as exc:
-        print(f"부가정보 CityData 조회 실패 ({area_cd}): {exc}")
+        print(f"부가정보 CityData 조회 실패 (관광지 {spot_id}): {type(exc).__name__}")
         # External API failure must not hide already-loaded festival data.
         return empty

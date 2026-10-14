@@ -111,7 +111,30 @@ def get_hourly_forecast(spot_id, lang="ko", now=None):
                  now, now + timedelta(hours=12)),
             )
             official = cur.fetchall()
+            historical = False
+            if not official:
+                # Demo fallback: show the last *issued* official forecast cycle
+                # as historical reference only. Never pretend expired hours are future.
+                cur.execute(
+                    """
+                    SELECT DISTINCT ON (fcst_time)
+                           fcst_time, congest_lvl, ppltn_max, ppltn_time
+                    FROM citydata_forecast
+                    WHERE area_cd = %s
+                      AND ppltn_time = (
+                        SELECT MAX(ppltn_time) FROM citydata_forecast
+                        WHERE area_cd = %s AND ppltn_time <= %s
+                      )
+                      AND congest_lvl IN ('여유','보통','약간 붐빔','붐빔')
+                    ORDER BY fcst_time, ppltn_time DESC
+                    LIMIT 12
+                    """,
+                    (area, area, now + timedelta(minutes=5)),
+                )
+                official = cur.fetchall()
+                historical = bool(official)
             return {
+                "historical": historical,
                 "source": "seoul_citydata_official" if official else None,
                 "regional_reference": not direct,
                 "source_area_cd": area,

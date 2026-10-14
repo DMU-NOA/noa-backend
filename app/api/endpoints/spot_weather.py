@@ -205,3 +205,27 @@ def live_weather_from_payload(citydata, *, lang="ko", now=None):
         "observed_at": observed_at.isoformat(),
         "nearby": False,
     }
+
+
+def resolve_citydata_area(spot_id, area_cd=None):
+    """Find a CityData region for live lookup, including unmapped tourist sites."""
+    if area_cd:
+        return area_cd
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT target_id
+                FROM place_nearby
+                WHERE content_id = %s AND target_type = 'citydata_area'
+                  AND distance_m <= 1000
+                ORDER BY distance_m, target_id
+                LIMIT 1
+                """,
+                (spot_id,),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+    finally:
+        conn.close()
