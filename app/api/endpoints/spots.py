@@ -48,8 +48,12 @@ LEFT JOIN spot_mapping m ON m.content_id = t.content_id
 LEFT JOIN seoul_spots s ON s.area_cd = m.area_cd
 LEFT JOIN latest_congestion a
   ON a.content_id = t.content_id AND a.source = 'actual'
+  AND a.updated_at BETWEEN CURRENT_TIMESTAMP - interval '45 minutes' AND CURRENT_TIMESTAMP
 LEFT JOIN latest_congestion pr
   ON pr.content_id = t.content_id AND pr.source = 'predicted'
+  AND pr.updated_at BETWEEN CURRENT_TIMESTAMP - interval '45 minutes' AND CURRENT_TIMESTAMP
+  AND (pr.prediction_verified IS TRUE OR
+       (pr.prediction_method = 'spatial_knn_bounded_experimental' AND pr.reference_distance_m <= 3000))
   AND a.content_id IS NULL
 """
 
